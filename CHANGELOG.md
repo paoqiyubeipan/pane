@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Command Code card.** Reads the key `commandcode login` saved (or a
+  pasted key / `COMMAND_CODE_API_KEY`): 5-hour, weekly and monthly
+  dollar limits, purchased credits and plan. Plan ids that gain a
+  version suffix (`individual-go-v1`) keep working; an unknown plan
+  shows the remaining monthly dollars instead of failing.
+- **Muse Code card.** Reads the `muse login` device token: 5-hour and
+  weekly usage with reset times, and the plan name.
+- **Mistral Vibe card.** Paste the Cookie header of a console.mistral.ai
+  request in Settings → API keys to see the Vibe allowance — Mistral
+  shows it only to its web console.
 - Updated the secure-connection (rustls), DeepSeek Harness log reader
   (zstd) and build (Vite) libraries to fix known security advisories.
 

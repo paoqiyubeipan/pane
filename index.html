@@ -319,6 +319,19 @@
             <input id="key-qwen" type="password" placeholder="sk-sp-… (auto-detected from env)" data-i18n-placeholder="settings.keyPhQwen" />
             <button data-save="qwen" data-i18n="settings.save">Save</button>
           </div>
+          <div class="key-row">
+            <label for="key-commandcode">Command Code</label>
+            <input id="key-commandcode" type="password" placeholder="API key (auto-detected from CLI)" data-i18n-placeholder="settings.keyPhCommandcode" />
+            <button data-save="commandcode" data-i18n="settings.save">Save</button>
+          </div>
+          <div class="key-row">
+            <label for="key-mistral">Mistral Vibe</label>
+            <input id="key-mistral" type="password" placeholder="Cookie header from console.mistral.ai" data-i18n-placeholder="settings.keyPhMistral" />
+            <button data-save="mistral" data-i18n="settings.save">Save</button>
+          </div>
+          <p class="settings-note" data-i18n="settings.mistralHint">
+            Mistral shows the Vibe allowance only to its web console: in console.mistral.ai open DevTools → Network, pick any request, and copy its Cookie header. Pane keeps only the csrftoken and ory_session pairs and sends them only to console.mistral.ai.
+          </p>
           <h4 class="settings-sub" data-i18n="settings.onenewapi">One/New API sites</h4>
           <p class="settings-note" data-i18n="settings.onenewapiNote">
             Register OneAPI / NewAPI compatible sites. Keys stay on this PC and are sent only to that site. Empty sites stay here; cards appear after you add a key.

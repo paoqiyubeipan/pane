@@ -115,6 +115,9 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | ElevenLabs | API Key（设置）→ 字符额度及重置进度预测 |
 | Ollama | 本地 `:11434` 服务 → 已安装及已加载的模型，无需 Key |
 | Codebuff | `codebuff login` 凭据文件或 API Key → 积分和每周额度 |
+| Command Code | `commandcode login` 密钥文件或 API Key → 5 小时、每周、每月美元额度 |
+| Muse Code | `muse login` 设备令牌（`%USERPROFILE%\.config\muse\auth.json`）→ 5 小时和每周用量 |
+| Mistral Vibe | 粘贴的 console.mistral.ai Cookie 请求头 → Vibe 额度 |
 | Kilo | Kilo CLI 登录文件或 API Key → 积分包和 Kilo Pass |
 | AihubMix | API Key（设置或从 OpenCode 自动发现）→ 用量与花费上限对比 |
 | One/New API | 在设置中添加多个兼容站点及每站多个 Key；每个 Key 对应一张额度卡片，密钥仅在本机供文件所有者读取 |

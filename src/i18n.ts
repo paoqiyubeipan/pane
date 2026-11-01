@@ -156,6 +156,10 @@ const en: Dict = {
   "settings.keyPhKilo": "API key (auto-detected from CLI)",
   "settings.keyPhAihubmix": "sk-… (auto-detected from OpenCode)",
   "settings.keyPhQwen": "sk-sp-… (auto-detected from env)",
+  "settings.keyPhCommandcode": "API key (auto-detected from CLI)",
+  "settings.keyPhMistral": "Cookie header from console.mistral.ai",
+  "settings.mistralHint":
+    "Mistral shows the Vibe allowance only to its web console: in console.mistral.ai open DevTools → Network, pick any request, and copy its Cookie header. Pane keeps only the csrftoken and ory_session pairs and sends them only to console.mistral.ai.",
 
   "settings.codexDirs": "Codex session folders",
   "settings.codexDirsNote":
@@ -356,6 +360,9 @@ const en: Dict = {
   "metric.recentModels": "Recent models",
   "metric.via": "Via",
   "metric.sessions": "Sessions",
+  "metric.monthlyCredits": "Monthly credits",
+  "metric.purchasedCredits": "Purchased credits",
+  "metric.quota": "Quota",
   "metric.expiry": "Expiry",
   "metric.modelWeekly": "{model} weekly",
 
@@ -594,6 +601,10 @@ const zh: Dict = {
   "settings.keyPhKilo": "API 密钥（可从 CLI 自动读取）",
   "settings.keyPhAihubmix": "sk-…（可从 OpenCode 自动读取）",
   "settings.keyPhQwen": "sk-sp-…（可从环境变量自动读取）",
+  "settings.keyPhCommandcode": "API 密钥（可从 CLI 自动读取）",
+  "settings.keyPhMistral": "console.mistral.ai 的 Cookie 请求头",
+  "settings.mistralHint":
+    "Mistral 只在网页控制台显示 Vibe 额度：在 console.mistral.ai 打开开发者工具 → 网络，选任意请求，复制它的 Cookie 请求头。Pane 只保留 csrftoken 和 ory_session 两项，且只发送给 console.mistral.ai。",
 
   "settings.codexDirs": "Codex 会话目录",
   "settings.codexDirsNote":
@@ -787,6 +798,9 @@ const zh: Dict = {
   "metric.recentModels": "最近使用的模型",
   "metric.via": "经由",
   "metric.sessions": "会话数",
+  "metric.monthlyCredits": "每月额度",
+  "metric.purchasedCredits": "已购额度",
+  "metric.quota": "额度",
   "metric.expiry": "到期",
   "metric.modelWeekly": "{model} 每周",
 
@@ -993,6 +1007,10 @@ const ru: Dict = {
   "settings.keyPhKilo": "Ключ API (можно взять из CLI)",
   "settings.keyPhAihubmix": "sk-… (можно взять из OpenCode)",
   "settings.keyPhQwen": "sk-sp-… (можно взять из переменных среды)",
+  "settings.keyPhCommandcode": "Ключ API (можно взять из CLI)",
+  "settings.keyPhMistral": "Заголовок Cookie с console.mistral.ai",
+  "settings.mistralHint":
+    "Mistral показывает лимит Vibe только в веб-консоли: откройте console.mistral.ai, DevTools → Network, выберите любой запрос и скопируйте его заголовок Cookie. Pane сохраняет только пары csrftoken и ory_session и отправляет их только на console.mistral.ai.",
 
   "settings.codexDirs": "Папки сессий Codex",
   "settings.codexDirsNote":
@@ -1166,6 +1184,9 @@ const ru: Dict = {
   "metric.recentModels": "Недавние модели",
   "metric.via": "Через",
   "metric.sessions": "Сессии",
+  "metric.monthlyCredits": "Кредиты на месяц",
+  "metric.purchasedCredits": "Купленные кредиты",
+  "metric.quota": "Квота",
   "metric.modelWeekly": "{model} за неделю",
 
   "link.Status": "Статус",
@@ -1308,6 +1329,9 @@ const METRIC_KEYS: Record<string, string> = {
   "Recent models": "metric.recentModels",
   Via: "metric.via",
   Sessions: "metric.sessions",
+  "Monthly credits": "metric.monthlyCredits",
+  "Purchased credits": "metric.purchasedCredits",
+  Quota: "metric.quota",
   Expiry: "metric.expiry",
   "Usage Trend": "spend.trend",
   Today: "spend.today",

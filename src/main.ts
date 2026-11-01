@@ -26,6 +26,7 @@ declare const __BUILD_STAMP__: string;
 import antigravityIcon from "./assets/providers/antigravity.svg?raw";
 import claudeIcon from "./assets/providers/claude.svg?raw";
 import codexIcon from "./assets/providers/codex.svg?raw";
+import commandcodeIcon from "./assets/providers/commandcode.svg?raw";
 import copilotIcon from "./assets/providers/copilot.svg?raw";
 import cursorIcon from "./assets/providers/cursor.svg?raw";
 import devinIcon from "./assets/providers/devin.svg?raw";
@@ -34,6 +35,8 @@ import grokIcon from "./assets/providers/grok.svg?raw";
 import hermesIcon from "./assets/providers/hermes.svg?raw";
 import kimiIcon from "./assets/providers/kimi.svg?raw";
 import minimaxIcon from "./assets/providers/minimax.svg?raw";
+import mistralIcon from "./assets/providers/mistral.svg?raw";
+import museIcon from "./assets/providers/muse.svg?raw";
 import onenewapiIcon from "./assets/providers/onenewapi.svg?raw";
 import stepfunIcon from "./assets/providers/stepfun.svg?raw";
 import sub2apiIcon from "./assets/providers/sub2api.svg?raw";
@@ -54,6 +57,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   antigravity: antigravityIcon,
   claude: claudeIcon,
   codex: codexIcon,
+  commandcode: commandcodeIcon,
   copilot: copilotIcon,
   cursor: cursorIcon,
   devin: devinIcon,
@@ -62,6 +66,8 @@ const PROVIDER_ICONS: Record<string, string> = {
   hermes: hermesIcon,
   kimi: kimiIcon,
   minimax: minimaxIcon,
+  mistral: mistralIcon,
+  muse: museIcon,
   onenewapi: onenewapiIcon,
   sub2api: sub2apiIcon,
   opencode: opencodeIcon,
@@ -341,6 +347,9 @@ const ALL_PROVIDERS: [string, string][] = [
   ["hermes", "Hermes"],
   ["kimi", "Kimi Code"],
   ["stepfun", "StepFun"],
+  ["commandcode", "Command Code"],
+  ["muse", "Muse Code"],
+  ["mistral", "Mistral Vibe"],
 ];
 
 function providerDisplayName(id: string): string {
@@ -411,6 +420,12 @@ const PROVIDER_LINKS: Record<string, { label: string; url: string }[]> = {
     { label: "Platform", url: "https://platform.stepfun.ai/" },
     { label: "Docs", url: "https://platform.stepfun.ai/docs/en/step-plan/overview" },
   ],
+  commandcode: [
+    { label: "Dashboard", url: "https://commandcode.ai/settings" },
+    { label: "API keys", url: "https://commandcode.ai/settings/keys" },
+  ],
+  muse: [{ label: "Dashboard", url: "https://dev.meta.ai/" }],
+  mistral: [{ label: "Console", url: "https://console.mistral.ai/" }],
 };
 
 // Brand palette for the Total Spend ring (Mac parity); unknown providers
@@ -441,6 +456,9 @@ const SPEND_COLORS: Record<string, string> = {
   hermes: "#c2a878", // Nous tan
   kimi: "#facc15", // Kimi Code sun yellow
   stepfun: "#a855f7", // StepFun vivid purple
+  commandcode: "#f97316", // Command Code orange
+  muse: "#0668e1", // Meta blue
+  mistral: "#fa520f", // Mistral flame orange
   __others__: "#8b8b94", // the folded small-spenders wedge
 };
 

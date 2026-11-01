@@ -769,7 +769,7 @@ struct StripEntry {
 /// strip ids are validated against this before becoming tray icon ids,
 /// including `family@account` cards. Stale family-level strip icons are
 /// removed for exactly this set.
-const STRIP_PROVIDER_IDS: [&str; 25] = [
+const STRIP_PROVIDER_IDS: [&str; 28] = [
     "claude",
     "codex",
     "cursor",
@@ -795,6 +795,9 @@ const STRIP_PROVIDER_IDS: [&str; 25] = [
     "onenewapi",
     "sub2api",
     "stepfun",
+    "commandcode",
+    "muse",
+    "mistral",
 ];
 
 async fn update_tray_strip(app: tauri::AppHandle, entries: Vec<StripEntry>) -> Result<(), String> {
@@ -1573,6 +1576,8 @@ const API_KEY_PROVIDERS: &[&str] = &[
     "aihubmix",
     "qwen",
     "stepfun",
+    "commandcode",
+    "mistral",
 ];
 
 fn is_plain_api_key_provider(family: &str) -> bool {
@@ -2022,6 +2027,30 @@ async fn fetch_usage(
                 "stepfun".into(),
                 "StepFun".into(),
                 providers::stepfun::snapshot(),
+            )),
+        ),
+        (
+            "commandcode",
+            Box::pin(guarded(
+                "commandcode".into(),
+                "Command Code".into(),
+                providers::commandcode::snapshot(),
+            )),
+        ),
+        (
+            "muse",
+            Box::pin(guarded(
+                "muse".into(),
+                "Muse Code".into(),
+                providers::muse::snapshot(),
+            )),
+        ),
+        (
+            "mistral",
+            Box::pin(guarded(
+                "mistral".into(),
+                "Mistral Vibe".into(),
+                providers::mistral::snapshot(),
             )),
         ),
     ];

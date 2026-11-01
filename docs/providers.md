@@ -494,6 +494,39 @@ Ground rules that apply to every provider:
 - **Calls:** `codebuff.com/api/v1/usage` + `/api/user/subscription`.
 - **Shows:** credits, weekly limit, plan.
 
+## Command Code
+
+- **Reads:** a pasted key, `COMMAND_CODE_API_KEY`, or the `apiKey` in
+  `%USERPROFILE%\.commandcode\auth.json` (the `commandcode login` file).
+- **Calls:** `api.commandcode.ai/alpha/billing/credits` +
+  `/alpha/billing/subscriptions`, the key as Bearer.
+- **Shows:** 5-hour and weekly dollar limits, the monthly credit grant
+  (size from `monthlyCreditsGranted`, else the plan's published price;
+  an unlisted plan id shows the remaining dollars as text), purchased
+  credits, plan.
+
+## Muse Code
+
+- **Reads:** the `dca:` device token in `%USERPROFILE%\.config\muse\auth.json`
+  (the `muse login` file; `MUSE_AUTH_PATH` overrides the path). The `LLM|`
+  inference key next to it is never read.
+- **Calls:** `POST api.meta.ai/muse-code/key` with `x-api-version: 1.0.0`,
+  the token as Bearer — the call the muse CLI makes.
+- **Shows:** 5-hour session and weekly used percentages with reset times,
+  plan. While the 5-hour window is idle Meta omits the quota, and the
+  card shows the plan alone.
+
+## Mistral Vibe
+
+- **Reads:** a pasted `Cookie:` header from console.mistral.ai. Only the
+  `csrftoken` and `ory_session_*` pairs are kept. Mistral exposes the
+  Vibe allowance only to its web console; the Vibe CLI's key or OIDC
+  login cannot read it.
+- **Calls:** `GET console.mistral.ai/api-ui/trpc/billing.vibeUsage` with
+  those two cookies and the matching `X-CSRFToken`, redirects off (an
+  expired session answers 302 to auth.mistral.ai).
+- **Shows:** Vibe allowance used percentage and reset time.
+
 ## Kilo
 
 - **Reads:** `%USERPROFILE%\.local\share\kilo\auth.json` or a pasted key.
