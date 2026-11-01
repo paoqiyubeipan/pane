@@ -519,8 +519,12 @@ Ground rules that apply to every provider:
 - **Calls:** `POST api.meta.ai/muse-code/key` with `x-api-version: 1.0.0`,
   the token as Bearer — the call the muse CLI makes.
 - **Shows:** 5-hour session and weekly used percentages with reset times,
-  plan. While the 5-hour window is idle Meta omits the quota, and the
-  card shows the plan alone.
+  plan. While the 5-hour window is idle Meta omits the quota (`muse usage`
+  says `server_sent_no_usage` too); the card then shows the session at 0%
+  and the last weekly reading of the same account, kept in
+  `%APPDATA%\Pane\muse_last_usage.json` and rolled to 0% at its weekly
+  reset. Use while Pane is not running can make that reading low until the
+  next active window.
 
 ## Mistral Vibe
 

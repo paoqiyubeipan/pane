@@ -6,20 +6,37 @@
 //!
 //! The answer holds the rolling 5-hour window and the week as used
 //! percentages. While the 5-hour window is idle Meta leaves `subs_usage`
-//! out entirely; the card then shows the plan without bars instead of an
-//! error. auth.meta.com and api.meta.ai bounce requests that carry no
-//! User-Agent, which the shared client always sets.
+//! out entirely — `muse usage` reports "server_sent_no_usage" then too.
+//! An idle window has nothing used, and the week cannot grow without one,
+//! so the card shows the session at 0% and the last weekly reading taken
+//! while a window was active (kept in `%APPDATA%\Pane\muse_last_usage.json`,
+//! per Meta account, rolled over at its weekly reset). auth.meta.com and
+//! api.meta.ai bounce requests that carry no User-Agent, which the shared
+//! client always sets.
 
-use super::{http, json_body, read_small_text, Metric, Snapshot};
+use super::{config_dir, http, json_body, read_small_text, Metric, Snapshot};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ID: &str = "muse";
 const NAME: &str = "Muse Code";
 const USAGE_URL: &str = "https://api.meta.ai/muse-code/key";
 const MAX_CRED_BYTES: u64 = 64 * 1024;
 const MAX_BODY_BYTES: usize = 256 * 1024;
+const SESSION_MS: i64 = 5 * 3_600_000;
 const WEEK_MS: i64 = 7 * 24 * 3_600_000;
+const LAST_READING_FILE: &str = "muse_last_usage.json";
+
+/// The weekly reading from the last answer that carried one.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct WeeklyReading {
+    user_id: String,
+    used_percent: f64,
+    /// Epoch ms.
+    resets_at: i64,
+    /// Epoch ms.
+    observed_at: i64,
+}
 
 pub async fn snapshot() -> Snapshot {
     match fetch().await {
@@ -47,6 +64,17 @@ fn token_from(doc: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|t| t.len() > 4 && t.starts_with("dca:"))
         .map(str::to_string)
+}
+
+fn load_reading_in(dir: &Path) -> Option<WeeklyReading> {
+    let raw = std::fs::read_to_string(dir.join(LAST_READING_FILE)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn save_reading_in(dir: &Path, reading: &WeeklyReading) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create config dir: {e}"))?;
+    let raw = serde_json::to_string_pretty(reading).map_err(|e| format!("encode reading: {e}"))?;
+    std::fs::write(dir.join(LAST_READING_FILE), raw).map_err(|e| format!("write reading: {e}"))
 }
 
 async fn fetch() -> Result<Snapshot, String> {
@@ -79,7 +107,15 @@ async fn fetch() -> Result<Snapshot, String> {
         return Err(format!("usage endpoint: HTTP {status}"));
     }
     let doc = json_body(resp, MAX_BODY_BYTES, "usage").await?;
-    parse(&doc)
+
+    let dir = config_dir();
+    let last = load_reading_in(&dir);
+    let (snap, reading) = parse(&doc, chrono::Utc::now().timestamp_millis(), last.as_ref())?;
+    if let Some(reading) = reading {
+        // Best-effort: a failed write only costs the idle-time weekly row.
+        let _ = save_reading_in(&dir, &reading);
+    }
+    Ok(snap)
 }
 
 fn percent(v: Option<&Value>) -> Option<f64> {
@@ -102,7 +138,40 @@ fn reset_ms(v: Option<&Value>) -> Option<i64> {
         .map(|d| d.timestamp_millis())
 }
 
-fn parse(doc: &Value) -> Result<Snapshot, String> {
+fn user_id(doc: &Value) -> Option<String> {
+    let id = match doc.get("user_id")? {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    Some(id).filter(|s| !s.is_empty())
+}
+
+/// The idle-time weekly row: the last reading of this account, or 0% once
+/// its weekly reset has passed (rolled forward to the current week).
+fn weekly_from_reading(reading: &WeeklyReading, now_ms: i64) -> Metric {
+    if reading.resets_at > now_ms {
+        let seen = chrono::DateTime::from_timestamp_millis(reading.observed_at)
+            .map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        return Metric::progress(
+            "Weekly",
+            reading.used_percent,
+            Some(format!("Last reading {seen}")),
+        )
+        .with_reset(Some(reading.resets_at), Some(WEEK_MS));
+    }
+    let weeks_passed = (now_ms - reading.resets_at).div_euclid(WEEK_MS) + 1;
+    Metric::progress("Weekly", 0.0, None)
+        .with_reset(Some(reading.resets_at + weeks_passed * WEEK_MS), Some(WEEK_MS))
+}
+
+/// The card, plus a fresh weekly reading to remember when the answer had one.
+fn parse(
+    doc: &Value,
+    now_ms: i64,
+    last: Option<&WeeklyReading>,
+) -> Result<(Snapshot, Option<WeeklyReading>), String> {
     if doc.get("require_payment").and_then(Value::as_bool) == Some(true) {
         return Err("Muse Code needs a payment method — finish billing at dev.meta.ai".into());
     }
@@ -115,8 +184,10 @@ fn parse(doc: &Value) -> Result<Snapshot, String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let user = user_id(doc);
 
     let mut metrics = Vec::new();
+    let mut reading = None;
     if let Some(usage) = doc.get("subs_usage").filter(|u| u.is_object()) {
         if let Some(w) = usage.get("window") {
             if let Some(pct) = percent(w.get("used_percent")) {
@@ -133,26 +204,46 @@ fn parse(doc: &Value) -> Result<Snapshot, String> {
         }
         if let Some(w) = usage.get("weekly") {
             if let Some(pct) = percent(w.get("used_percent")) {
+                let resets_at = reset_ms(w.get("resets_at"));
                 metrics.push(
-                    Metric::progress("Weekly", pct, None)
-                        .with_reset(reset_ms(w.get("resets_at")), Some(WEEK_MS)),
+                    Metric::progress("Weekly", pct, None).with_reset(resets_at, Some(WEEK_MS)),
                 );
+                if let (Some(user_id), Some(resets_at)) = (user.clone(), resets_at) {
+                    reading = Some(WeeklyReading {
+                        user_id,
+                        used_percent: pct,
+                        resets_at,
+                        observed_at: now_ms,
+                    });
+                }
             }
         }
     }
+
     if metrics.is_empty() {
-        metrics.push(Metric::text(
-            "Quota",
-            "Shown while a 5-hour window is active".into(),
-        ));
+        // Idle 5-hour window: Meta sends no quota at all.
+        metrics.push(
+            Metric::progress("Session", 0.0, Some("Idle — starts with your next request".into()))
+                .with_reset(None, Some(SESSION_MS)),
+        );
+        let same_account = last.filter(|r| user.as_deref() == Some(r.user_id.as_str()));
+        metrics.push(match same_account {
+            Some(r) => weekly_from_reading(r, now_ms),
+            None => Metric::text("Weekly", "Shown after your next request".into()),
+        });
     }
-    Ok(Snapshot::ok(ID, NAME, plan, metrics))
+    Ok((Snapshot::ok(ID, NAME, plan, metrics), reading))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 2026-11-01T12:00:00Z
+    const NOW: i64 = 1_793_534_400_000;
+    /// 2026-11-02T00:00:00Z, the Monday weekly reset.
+    const WEEK_RESET: i64 = 1_793_577_600_000;
 
     fn active(usage: Value) -> Value {
         json!({
@@ -165,34 +256,87 @@ mod tests {
         })
     }
 
+    fn idle() -> Value {
+        let mut doc = active(Value::Null);
+        doc.as_object_mut().unwrap().remove("subs_usage");
+        doc
+    }
+
+    fn reading(user_id: &str) -> WeeklyReading {
+        WeeklyReading {
+            user_id: user_id.into(),
+            used_percent: 57.4,
+            resets_at: WEEK_RESET,
+            observed_at: NOW - 3_600_000,
+        }
+    }
+
     #[test]
-    fn both_windows_become_rows() {
+    fn both_windows_become_rows_and_are_remembered() {
         let doc = active(json!({
-            "window": { "used_percent": 6, "window_duration_mins": 300, "resets_at": 1_793_965_287 },
-            "weekly": { "used_percent": 57.4, "resets_at": 1_794_009_600 }
+            "window": { "used_percent": 6, "window_duration_mins": 300, "resets_at": 1_793_545_287 },
+            "weekly": { "used_percent": 57.4, "resets_at": WEEK_RESET / 1000 }
         }));
-        let snap = parse(&doc).unwrap();
+        let (snap, saved) = parse(&doc, NOW, None).unwrap();
         assert_eq!(snap.plan.as_deref(), Some("Muse Code Everyday Usage"));
         let session = &snap.metrics[0];
         assert_eq!(session.label, "Session");
         assert_eq!(session.used_percent, Some(6.0));
-        assert_eq!(session.resets_at, Some(1_793_965_287_000));
-        assert_eq!(session.period_ms, Some(5 * 3_600_000));
+        assert_eq!(session.resets_at, Some(1_793_545_287_000));
+        assert_eq!(session.period_ms, Some(SESSION_MS));
         let weekly = &snap.metrics[1];
         assert_eq!(weekly.label, "Weekly");
         assert_eq!(weekly.used_percent, Some(57.4));
-        assert_eq!(weekly.resets_at, Some(1_794_009_600_000));
+        assert_eq!(weekly.resets_at, Some(WEEK_RESET));
         assert_eq!(weekly.period_ms, Some(WEEK_MS));
+        assert_eq!(
+            saved,
+            Some(WeeklyReading {
+                user_id: "1234".into(),
+                used_percent: 57.4,
+                resets_at: WEEK_RESET,
+                observed_at: NOW,
+            })
+        );
     }
 
     #[test]
-    fn idle_window_shows_plan_without_bars() {
-        let mut doc = active(Value::Null);
-        doc.as_object_mut().unwrap().remove("subs_usage");
-        let snap = parse(&doc).unwrap();
+    fn idle_window_shows_zero_session_and_last_weekly() {
+        let last = reading("1234");
+        let (snap, saved) = parse(&idle(), NOW, Some(&last)).unwrap();
         assert_eq!(snap.status, "ok");
-        assert_eq!(snap.metrics.len(), 1);
-        assert_eq!(snap.metrics[0].kind, "text");
+        assert_eq!(saved, None, "an idle answer must not overwrite the reading");
+        let session = &snap.metrics[0];
+        assert_eq!(session.label, "Session");
+        assert_eq!(session.used_percent, Some(0.0));
+        assert_eq!(session.resets_at, None);
+        let weekly = &snap.metrics[1];
+        assert_eq!(weekly.kind, "progress");
+        assert_eq!(weekly.used_percent, Some(57.4));
+        assert_eq!(weekly.resets_at, Some(WEEK_RESET));
+        assert!(weekly.detail.as_deref().unwrap_or("").starts_with("Last reading"));
+    }
+
+    #[test]
+    fn idle_after_weekly_reset_rolls_to_zero() {
+        let last = reading("1234");
+        let later = WEEK_RESET + 8 * 24 * 3_600_000; // past two resets
+        let (snap, _) = parse(&idle(), later, Some(&last)).unwrap();
+        let weekly = &snap.metrics[1];
+        assert_eq!(weekly.used_percent, Some(0.0));
+        assert_eq!(weekly.resets_at, Some(WEEK_RESET + 2 * WEEK_MS));
+        assert_eq!(weekly.detail, None);
+    }
+
+    #[test]
+    fn idle_ignores_another_accounts_reading() {
+        let last = reading("9999");
+        let (snap, _) = parse(&idle(), NOW, Some(&last)).unwrap();
+        assert_eq!(snap.metrics[1].kind, "text");
+        let (snap, _) = parse(&idle(), NOW, None).unwrap();
+        assert_eq!(snap.metrics.len(), 2);
+        assert_eq!(snap.metrics[1].label, "Weekly");
+        assert_eq!(snap.metrics[1].kind, "text");
     }
 
     #[test]
@@ -201,10 +345,11 @@ mod tests {
             "window": { "used_percent": 140, "window_duration_mins": 300 },
             "weekly": { "used_percent": -3 }
         }));
-        let snap = parse(&doc).unwrap();
+        let (snap, saved) = parse(&doc, NOW, None).unwrap();
         assert_eq!(snap.metrics[0].used_percent, Some(100.0));
         assert_eq!(snap.metrics[0].resets_at, None);
         assert_eq!(snap.metrics[1].used_percent, Some(0.0));
+        assert_eq!(saved, None, "no reset time, nothing to remember");
     }
 
     #[test]
@@ -212,10 +357,10 @@ mod tests {
         let mut unpaid = active(Value::Null);
         unpaid["require_payment"] = json!(true);
         // Snapshot has no Debug, so no unwrap_err.
-        assert!(parse(&unpaid).err().unwrap().contains("payment"));
+        assert!(parse(&unpaid, NOW, None).err().unwrap().contains("payment"));
         let mut lapsed = active(Value::Null);
         lapsed["is_subs_active"] = json!(false);
-        assert!(parse(&lapsed).err().unwrap().contains("subscription"));
+        assert!(parse(&lapsed, NOW, None).err().unwrap().contains("subscription"));
     }
 
     #[test]
@@ -230,5 +375,21 @@ mod tests {
         assert_eq!(token_from(&inference_only), None);
         let wrong_kind = json!({ "providers": { "meta": { "access_token": "LLM|xyz" } } });
         assert_eq!(token_from(&wrong_kind), None);
+    }
+
+    #[test]
+    fn reading_round_trips_through_its_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "pane-muse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        assert_eq!(load_reading_in(&dir), None);
+        save_reading_in(&dir, &reading("1234")).unwrap();
+        assert_eq!(load_reading_in(&dir), Some(reading("1234")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

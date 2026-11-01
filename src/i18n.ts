@@ -447,6 +447,9 @@ const en: Dict = {
   "tray.left": "{label}: {n}% left",
 
   "detail.unlimited": "Unlimited",
+  "detail.idleNextRequest": "Idle — starts with your next request",
+  "detail.afterNextRequest": "Shown after your next request",
+  "detail.lastReading": "Last reading {when}",
   "detail.moneyOfLeft": "{a} of {b} left",
   "detail.moneyOfLeftCredits": "{a} of {b} left · {n} credits",
   "detail.moneyLeftOf": "{a} left of {b}",
@@ -887,6 +890,9 @@ const zh: Dict = {
   "tray.left": "{label}：剩余 {n}%",
 
   "detail.unlimited": "无限制",
+  "detail.idleNextRequest": "空闲，下次请求时开始计时",
+  "detail.afterNextRequest": "下次请求后显示",
+  "detail.lastReading": "最后读数 {when}",
   "detail.moneyOfLeft": "{a} / {b} 剩余",
   "detail.moneyOfLeftCredits": "{a} / {b} 剩余 · {n} 额度",
   "detail.moneyLeftOf": "{a} / {b} 剩余",
@@ -1279,6 +1285,9 @@ const ru: Dict = {
   "tray.left": "{label}: осталось {n}%",
 
   "detail.unlimited": "Без лимита",
+  "detail.idleNextRequest": "Простой — начнётся со следующего запроса",
+  "detail.afterNextRequest": "Появится после следующего запроса",
+  "detail.lastReading": "Последнее значение {when}",
   "detail.moneyOfLeft": "{a} / {b} осталось",
   "detail.moneyOfLeftCredits": "{a} / {b} осталось · {n} кредитов",
   "detail.moneyLeftOf": "{a} / {b} осталось",
@@ -1461,6 +1470,10 @@ export function displayMetricDetail(text: string): string {
   if (m) return t("detail.countOfLeft", { a: m[1], b: m[2] });
   if (/^available$/i.test(text.trim())) return t("card.available");
   if (/^unlimited$/i.test(text.trim())) return t("detail.unlimited");
+  if (text === "Idle — starts with your next request") return t("detail.idleNextRequest");
+  if (text === "Shown after your next request") return t("detail.afterNextRequest");
+  m = text.match(/^Last reading (.+)$/);
+  if (m) return t("detail.lastReading", { when: m[1] });
   return text;
 }
 

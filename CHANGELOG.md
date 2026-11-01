@@ -8,7 +8,9 @@
   version suffix (`individual-go-v1`) keep working; an unknown plan
   shows the remaining monthly dollars instead of failing.
 - **Muse Code card.** Reads the `muse login` device token: 5-hour and
-  weekly usage with reset times, and the plan name.
+  weekly usage with reset times, and the plan name. While the 5-hour
+  window is idle (Meta then sends no usage) it shows the session at 0%
+  and the last weekly reading.
 - **OpenRouter free-model requests.** The OpenRouter card now leads with
   today's free-model requests against the daily cap (50, or 1,000 once
   $10 of credits were ever bought), resetting at 00:00 UTC.
