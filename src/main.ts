@@ -5524,7 +5524,7 @@ interface OpenRouterKeyDto {
 }
 
 async function loadOpenRouterKeys(): Promise<void> {
-  const list = query("#or-keys");
+  const list = document.querySelector("#or-keys");
   if (!list) return;
   let keys: OpenRouterKeyDto[] = [];
   try {
@@ -5543,8 +5543,8 @@ async function loadOpenRouterKeys(): Promise<void> {
 }
 
 async function addOpenRouterKey(): Promise<void> {
-  const nameInput = query<HTMLInputElement>("#or-add-name");
-  const keyInput = query<HTMLInputElement>("#or-add-key");
+  const nameInput = document.querySelector<HTMLInputElement>("#or-add-name");
+  const keyInput = document.querySelector<HTMLInputElement>("#or-add-key");
   const status = document.querySelector("#status")!;
   if (!nameInput || !keyInput || !keyInput.value.trim()) return;
   try {
@@ -5579,11 +5579,11 @@ async function removeOpenRouterKey(id: string): Promise<void> {
 }
 
 function initOpenRouterKeys(): void {
-  query<HTMLFormElement>("#or-add")?.addEventListener("submit", (e) => {
+  document.querySelector<HTMLFormElement>("#or-add")?.addEventListener("submit", (e) => {
     e.preventDefault();
     void addOpenRouterKey();
   });
-  query("#or-keys")?.addEventListener("click", (e) => {
+  document.querySelector("#or-keys")?.addEventListener("click", (e) => {
     const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-or-remove]");
     if (!btn) return;
     e.preventDefault();
