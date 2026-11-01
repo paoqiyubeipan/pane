@@ -5516,6 +5516,82 @@ function siteKeyManager(id: string) {
   return siteKeyManagers.find((manager) => manager.family === providerFamily(id));
 }
 
+// Extra OpenRouter keys: one openrouter@<fingerprint> card per key. The
+// backend never hands keys back — only ids and names.
+interface OpenRouterKeyDto {
+  id: string;
+  name: string;
+}
+
+async function loadOpenRouterKeys(): Promise<void> {
+  const list = query("#or-keys");
+  if (!list) return;
+  let keys: OpenRouterKeyDto[] = [];
+  try {
+    keys = await invoke<OpenRouterKeyDto[]>("openrouter_list_keys");
+  } catch {
+    // Leave the list empty; the add form still works.
+  }
+  list.innerHTML = keys
+    .map(
+      (k) => `<li class="ona-key"><div class="ona-key-row">
+        <span class="ona-key-label">${escapeHtml(k.name)}</span>
+        <button type="button" class="mini-btn danger" data-or-remove="${escapeHtml(k.id)}">${escapeHtml(t("settings.onenewapiDeleteKey"))}</button>
+      </div></li>`
+    )
+    .join("");
+}
+
+async function addOpenRouterKey(): Promise<void> {
+  const nameInput = query<HTMLInputElement>("#or-add-name");
+  const keyInput = query<HTMLInputElement>("#or-add-key");
+  const status = document.querySelector("#status")!;
+  if (!nameInput || !keyInput || !keyInput.value.trim()) return;
+  try {
+    const added = await invoke<OpenRouterKeyDto>("openrouter_add_key", {
+      name: nameInput.value,
+      key: keyInput.value,
+    });
+    nameInput.value = "";
+    keyInput.value = "";
+    status.textContent = t("footer.keySaved", { name: `OpenRouter · ${added.name}` });
+    await loadOpenRouterKeys();
+    await forceUsageRefreshAttempt();
+    requestTraySync();
+  } catch (err) {
+    status.textContent = String(err);
+  }
+}
+
+async function removeOpenRouterKey(id: string): Promise<void> {
+  const status = document.querySelector("#status")!;
+  try {
+    await invoke("openrouter_remove_key", { id });
+    // The backend dropped the card from layout/disabled; pick that up so a
+    // later config write doesn't put it back.
+    config = await invoke<Config>("get_config");
+    await loadOpenRouterKeys();
+    await forceUsageRefreshAttempt();
+    requestTraySync();
+  } catch (err) {
+    status.textContent = String(err);
+  }
+}
+
+function initOpenRouterKeys(): void {
+  query<HTMLFormElement>("#or-add")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void addOpenRouterKey();
+  });
+  query("#or-keys")?.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>("[data-or-remove]");
+    if (!btn) return;
+    e.preventDefault();
+    void removeOpenRouterKey(btn.dataset.orRemove!);
+  });
+  void loadOpenRouterKeys();
+}
+
 async function unparkRecentlyKeyed(): Promise<void> {
   if (!config.disabled.some((id) => recentlyKeyed.has(id))) return;
   await patchConfig({
@@ -5895,6 +5971,7 @@ async function initSettings(): Promise<void> {
   });
 
   for (const manager of siteKeyManagers) manager.init();
+  initOpenRouterKeys();
 
   initWidget({ getConfig: () => config, patchConfig, brandColor: spendColor, syncSeasonalFx: syncBats });
 }

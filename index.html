@@ -251,6 +251,17 @@
             <input id="key-openrouter" type="password" placeholder="sk-or-v1-…" />
             <button data-save="openrouter" data-i18n="settings.save">Save</button>
           </div>
+          <p class="settings-note" data-i18n="settings.orExtraNote">
+            Keys of other OpenRouter accounts each get their own card. Keys of the same account share its free-model requests.
+          </p>
+          <ul id="or-keys" class="ona-keys"></ul>
+          <form id="or-add" class="ona-key-add" autocomplete="off">
+            <input id="or-add-name" type="text" spellcheck="false" placeholder="Name (e.g. second account)" data-i18n-placeholder="settings.orExtraNamePh" />
+            <div class="ona-add-row">
+              <input id="or-add-key" type="password" placeholder="sk-or-v1-…" autocomplete="new-password" />
+              <button type="submit" data-i18n="settings.orExtraAdd">Add key</button>
+            </div>
+          </form>
           <div class="key-row">
             <label for="key-zai">Z.ai / GLM</label>
             <input id="key-zai" type="password" placeholder="API key" data-i18n-placeholder="settings.keyPlaceholder" />

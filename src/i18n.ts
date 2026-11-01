@@ -156,6 +156,10 @@ const en: Dict = {
   "settings.keyPhKilo": "API key (auto-detected from CLI)",
   "settings.keyPhAihubmix": "sk-… (auto-detected from OpenCode)",
   "settings.keyPhQwen": "sk-sp-… (auto-detected from env)",
+  "settings.orExtraNote":
+    "Keys of other OpenRouter accounts each get their own card. Keys of the same account share its free-model requests.",
+  "settings.orExtraNamePh": "Name (e.g. second account)",
+  "settings.orExtraAdd": "Add key",
   "settings.keyPhCommandcode": "API key (auto-detected from CLI)",
   "settings.keyPhMistral": "Cookie header from console.mistral.ai",
   "settings.mistralHint":
@@ -363,6 +367,7 @@ const en: Dict = {
   "metric.monthlyCredits": "Monthly credits",
   "metric.purchasedCredits": "Purchased credits",
   "metric.quota": "Quota",
+  "metric.freeRequests": "Free requests",
   "metric.expiry": "Expiry",
   "metric.modelWeekly": "{model} weekly",
 
@@ -601,6 +606,9 @@ const zh: Dict = {
   "settings.keyPhKilo": "API 密钥（可从 CLI 自动读取）",
   "settings.keyPhAihubmix": "sk-…（可从 OpenCode 自动读取）",
   "settings.keyPhQwen": "sk-sp-…（可从环境变量自动读取）",
+  "settings.orExtraNote": "其他 OpenRouter 账号的 Key 各自显示一张卡片。同一账号的多个 Key 共用该账号的免费模型请求次数。",
+  "settings.orExtraNamePh": "名称（如：第二个账号）",
+  "settings.orExtraAdd": "添加 Key",
   "settings.keyPhCommandcode": "API 密钥（可从 CLI 自动读取）",
   "settings.keyPhMistral": "console.mistral.ai 的 Cookie 请求头",
   "settings.mistralHint":
@@ -801,6 +809,7 @@ const zh: Dict = {
   "metric.monthlyCredits": "每月额度",
   "metric.purchasedCredits": "已购额度",
   "metric.quota": "额度",
+  "metric.freeRequests": "免费请求",
   "metric.expiry": "到期",
   "metric.modelWeekly": "{model} 每周",
 
@@ -1007,6 +1016,10 @@ const ru: Dict = {
   "settings.keyPhKilo": "Ключ API (можно взять из CLI)",
   "settings.keyPhAihubmix": "sk-… (можно взять из OpenCode)",
   "settings.keyPhQwen": "sk-sp-… (можно взять из переменных среды)",
+  "settings.orExtraNote":
+    "Ключи других аккаунтов OpenRouter получают по отдельной карточке. Ключи одного аккаунта делят его бесплатные запросы.",
+  "settings.orExtraNamePh": "Название (например, второй аккаунт)",
+  "settings.orExtraAdd": "Добавить ключ",
   "settings.keyPhCommandcode": "Ключ API (можно взять из CLI)",
   "settings.keyPhMistral": "Заголовок Cookie с console.mistral.ai",
   "settings.mistralHint":
@@ -1187,6 +1200,7 @@ const ru: Dict = {
   "metric.monthlyCredits": "Кредиты на месяц",
   "metric.purchasedCredits": "Купленные кредиты",
   "metric.quota": "Квота",
+  "metric.freeRequests": "Бесплатные запросы",
   "metric.modelWeekly": "{model} за неделю",
 
   "link.Status": "Статус",
@@ -1332,6 +1346,7 @@ const METRIC_KEYS: Record<string, string> = {
   "Monthly credits": "metric.monthlyCredits",
   "Purchased credits": "metric.purchasedCredits",
   Quota: "metric.quota",
+  "Free requests": "metric.freeRequests",
   Expiry: "metric.expiry",
   "Usage Trend": "spend.trend",
   Today: "spend.today",

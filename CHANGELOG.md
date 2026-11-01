@@ -9,6 +9,12 @@
   shows the remaining monthly dollars instead of failing.
 - **Muse Code card.** Reads the `muse login` device token: 5-hour and
   weekly usage with reset times, and the plan name.
+- **OpenRouter free-model requests.** The OpenRouter card now leads with
+  today's free-model requests against the daily cap (50, or 1,000 once
+  $10 of credits were ever bought), resetting at 00:00 UTC.
+- **More OpenRouter keys.** Add keys of other OpenRouter accounts in
+  Settings → API keys; each gets its own card. Removing one also clears
+  its cached card.
 - **Mistral Vibe card.** Paste the Cookie header of a console.mistral.ai
   request in Settings → API keys to see the Vibe allowance — Mistral
   shows it only to its web console.

@@ -277,8 +277,14 @@ Ground rules that apply to every provider:
 ## OpenRouter
 
 - **Reads:** pasted key, `OPENROUTER_API_KEY`, or the key OpenCode stores.
-- **Calls:** `openrouter.ai/api/v1/credits` and `/key`.
-- **Shows:** balance, credits meter, key limit.
+  Extra keys added in Settings live in `%APPDATA%\Pane\openrouter_keys.json`
+  (owner-only); each gets its own `openrouter@<fingerprint>` card, where
+  the fingerprint is a one-way hash of the key.
+- **Calls:** `openrouter.ai/api/v1/credits` and `/key`, per key.
+- **Shows:** free-model requests used today against the daily cap
+  (`free_model_daily_requests`; resets at 00:00 UTC — 50 a day until $10
+  of credits were ever bought, 1,000 after; shared by all keys of one
+  account), balance, credits meter, key limit.
 
 ## Z.ai (GLM Coding Plan)
 

@@ -2106,6 +2106,16 @@ async fn fetch_usage(
             )),
         ));
     }
+    // Extra OpenRouter keys from Settings: one openrouter@<fingerprint>
+    // card each. The family is a plain API-key provider, so these ride the
+    // credential generations below like the main key.
+    for card in providers::openrouter::extra_keys() {
+        let (id, name) = (card.card_id(), card.card_name());
+        futs.push((
+            id.clone(),
+            Box::pin(guarded(id, name, providers::openrouter::snapshot_key(card))),
+        ));
+    }
     // Plain API-key providers ride the same generation scheme as managed
     // key cards: set_api_key bumps a provider's generation when its stored
     // credential actually changes, so a request the old key started can be
@@ -2690,6 +2700,11 @@ fn cached_usage() -> Vec<providers::Snapshot> {
     let configured_sub2api: HashSet<String> = providers::sub2api::key_cards()
         .map(|cards| cards.into_iter().map(|card| card.id).collect())
         .unwrap_or_default();
+    // A removed extra OpenRouter key must not paint from cache either.
+    let configured_openrouter: HashSet<String> = providers::openrouter::extra_keys()
+        .iter()
+        .map(providers::openrouter::ExtraKey::card_id)
+        .collect();
 
     // Same account-swap rule as the live path: if a different account
     // signed into a default home since the cache was written, that
@@ -2726,6 +2741,7 @@ fn cached_usage() -> Vec<providers::Snapshot> {
                 && !card_is_disabled(id, &disabled)
                 && cached_onenewapi_id_is_configured(id, &configured_onenewapi)
                 && (family_of(id) != "sub2api" || configured_sub2api.contains(id))
+                && (!id.starts_with("openrouter@") || configured_openrouter.contains(id))
                 && !swapped.iter().any(|f| f == id)
         })
         .map(|(_, c)| {
@@ -2940,6 +2956,31 @@ fn set_api_key_in(dir: &Path, provider: &str, key: &str) -> Result<(), String> {
 #[tauri::command]
 fn set_api_key(provider: String, key: String) -> Result<(), String> {
     set_api_key_in(&providers::config_dir(), &provider, &key)
+}
+
+/// Extra OpenRouter keys (names and ids only — keys never go back out).
+#[tauri::command]
+fn openrouter_list_keys() -> Vec<providers::openrouter::ExtraKeyDto> {
+    providers::openrouter::list_keys()
+}
+
+#[tauri::command]
+fn openrouter_add_key(
+    name: String,
+    key: String,
+) -> Result<providers::openrouter::ExtraKeyDto, String> {
+    providers::openrouter::add_key_in(&providers::config_dir(), &name, &key)
+}
+
+/// Removing a key drops what its card produced — cached snapshot, local
+/// HTTP publication, cooldown, alerts — and its layout/disabled entries.
+#[tauri::command]
+fn openrouter_remove_key(id: String) -> Result<(), String> {
+    let ids = vec![format!("openrouter@{id}")];
+    let _mutation = KeyCardMutationGuard::begin(ids.clone());
+    providers::openrouter::remove_key_in(&providers::config_dir(), &id)?;
+    persist_key_cards_config_purge(&ids)?;
+    forget_provider_snapshots(&ids)
 }
 
 #[tauri::command]
@@ -3653,6 +3694,9 @@ pub fn run() {
             cached_usage,
             fetch_spend,
             set_api_key,
+            openrouter_list_keys,
+            openrouter_add_key,
+            openrouter_remove_key,
             onenewapi_list_sites,
             onenewapi_probe_site,
             onenewapi_create_site,

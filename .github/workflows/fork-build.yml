@@ -34,7 +34,7 @@ jobs:
         run: npm run build
 
       - name: Provider unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- providers::commandcode providers::muse providers::mistral
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- providers::commandcode providers::muse providers::mistral providers::openrouter
 
       - name: Build installer (no updater signing)
         shell: pwsh

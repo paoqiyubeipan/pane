@@ -166,7 +166,7 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | Devin (Devin CLI) | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC; local CLI session store for spend |
 | Droid (Factory CLI) | Droid CLI login (`~/.factory/auth.v2.keyring`, read-only) + Factory billing limits API; local `~/.factory/sessions` for spend |
 | MiniMax | API key (Settings, env var, or CLI config) + token-plan API |
-| OpenRouter | API key (Settings) or key stored by OpenCode |
+| OpenRouter | API key (Settings) or key stored by OpenCode, plus extra keys of other accounts → free-model requests today, balance, key limit |
 | Z.ai | API key (Settings), CLI key file, or env var |
 | Antigravity | Local language server, or Google Cloud Code API via Credential Manager; local conversation databases for spend |
 | DeepSeek | API key (Settings) → balance |

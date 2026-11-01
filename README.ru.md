@@ -174,7 +174,7 @@ Antigravity, Cursor CSV, MiniMax CLI, Kimi Code, Qwen Code, агент pi
 | Devin (Devin CLI) | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC; локальное хранилище сессий CLI для расходов |
 | Droid (Factory CLI) | Вход Droid CLI (`~/.factory/auth.v2.keyring`, только чтение) + API лимитов Factory; локальные сессии `~/.factory/sessions` для расходов |
 | MiniMax | API-ключ (настройки, переменная окружения или конфигурация CLI) + API тарифов с лимитами токенов |
-| OpenRouter | API-ключ (настройки) или ключ, сохранённый OpenCode |
+| OpenRouter | API-ключ (настройки) или ключ, сохранённый OpenCode, плюс ключи других аккаунтов → бесплатные запросы за сегодня, баланс, лимит ключа |
 | Z.ai | API-ключ (настройки), файл ключа CLI или переменная окружения |
 | Antigravity | Локальный языковой сервер или Google Cloud Code API через Диспетчер учётных данных; локальные базы диалогов для расходов |
 | DeepSeek | API-ключ (настройки) → баланс |

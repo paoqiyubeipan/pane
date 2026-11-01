@@ -105,7 +105,7 @@ Pane 是一款轻量的 Tauri v2 应用：Rust 核心负责数据处理，原生
 | Devin（Devin CLI） | `%APPDATA%\devin\credentials.toml` + GetUserStatus RPC；本地 CLI 会话记录用于统计花费 |
 | Droid（Factory CLI） | Droid CLI 登录（`~/.factory/auth.v2.keyring`，只读）+ Factory 额度 API；本地 `~/.factory/sessions` 用于统计花费 |
 | MiniMax | API Key（设置、环境变量或 CLI 配置）+ Token 套餐 API |
-| OpenRouter | API Key（设置）或 OpenCode 保存的 Key |
+| OpenRouter | API Key（设置）或 OpenCode 保存的 Key，可另加其他账号的 Key → 今日免费模型请求次数、余额、Key 限额 |
 | Z.ai | API Key（设置）、CLI Key 文件或环境变量 |
 | Antigravity | 本地语言服务器，或通过凭据管理器访问 Google Cloud Code API；本地对话数据库用于统计花费 |
 | DeepSeek | API Key（设置）→ 余额 |
