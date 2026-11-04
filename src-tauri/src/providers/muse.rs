@@ -14,7 +14,7 @@
 //! api.meta.ai bounce requests that carry no User-Agent, which the shared
 //! client always sets.
 
-use super::{config_dir, http, json_body, read_small_text, Metric, Snapshot};
+use super::{config_dir, http, json_body, key_fingerprint, read_small_text, Metric, Snapshot};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,8 @@ const LAST_READING_FILE: &str = "muse_last_usage.json";
 /// The weekly reading from the last answer that carried one.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct WeeklyReading {
-    user_id: String,
+    /// Fingerprint of the account (see `account_of`), never the address.
+    account: String,
     used_percent: f64,
     /// Epoch ms.
     resets_at: i64,
@@ -138,13 +139,15 @@ fn reset_ms(v: Option<&Value>) -> Option<i64> {
         .map(|d| d.timestamp_millis())
 }
 
-fn user_id(doc: &Value) -> Option<String> {
-    let id = match doc.get("user_id")? {
-        Value::String(s) => s.trim().to_string(),
-        Value::Number(n) => n.to_string(),
-        _ => return None,
-    };
-    Some(id).filter(|s| !s.is_empty())
+/// Whose reading this is. The answer carries `user_email` but no user id
+/// (Nov 2026); only a one-way fingerprint of it is ever stored.
+fn account_of(doc: &Value) -> Option<String> {
+    let id = ["user_email", "user_id"].iter().find_map(|k| match doc.get(*k)? {
+        Value::String(s) => Some(s.trim().to_lowercase()).filter(|s| !s.is_empty()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })?;
+    Some(key_fingerprint(&id))
 }
 
 /// The idle-time weekly row: the last reading of this account, or 0% once
@@ -184,7 +187,7 @@ fn parse(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let user = user_id(doc);
+    let account = account_of(doc);
 
     let mut metrics = Vec::new();
     let mut reading = None;
@@ -208,9 +211,9 @@ fn parse(
                 metrics.push(
                     Metric::progress("Weekly", pct, None).with_reset(resets_at, Some(WEEK_MS)),
                 );
-                if let (Some(user_id), Some(resets_at)) = (user.clone(), resets_at) {
+                if let (Some(account), Some(resets_at)) = (account.clone(), resets_at) {
                     reading = Some(WeeklyReading {
-                        user_id,
+                        account,
                         used_percent: pct,
                         resets_at,
                         observed_at: now_ms,
@@ -226,7 +229,7 @@ fn parse(
             Metric::progress("Session", 0.0, Some("Idle — starts with your next request".into()))
                 .with_reset(None, Some(SESSION_MS)),
         );
-        let same_account = last.filter(|r| user.as_deref() == Some(r.user_id.as_str()));
+        let same_account = last.filter(|r| account.as_deref() == Some(r.account.as_str()));
         metrics.push(match same_account {
             Some(r) => weekly_from_reading(r, now_ms),
             None => Metric::text("Weekly", "Shown after your next request".into()),
@@ -245,13 +248,16 @@ mod tests {
     /// 2026-11-02T00:00:00Z, the Monday weekly reset.
     const WEEK_RESET: i64 = 1_793_577_600_000;
 
+    /// The fields the endpoint really sends (Nov 2026): an e-mail, no user id.
     fn active(usage: Value) -> Value {
         json!({
             "require_payment": false,
             "is_subs_active": true,
+            "has_payment_method": true,
+            "subs_tier_id": "tier",
             "subs_tier_name": "Muse Code Everyday Usage",
+            "user_full_name": "Someone",
             "user_email": "someone@example.com",
-            "user_id": "1234",
             "subs_usage": usage
         })
     }
@@ -262,9 +268,13 @@ mod tests {
         doc
     }
 
-    fn reading(user_id: &str) -> WeeklyReading {
+    fn me() -> String {
+        key_fingerprint("someone@example.com")
+    }
+
+    fn reading(account: &str) -> WeeklyReading {
         WeeklyReading {
-            user_id: user_id.into(),
+            account: account.into(),
             used_percent: 57.4,
             resets_at: WEEK_RESET,
             observed_at: NOW - 3_600_000,
@@ -292,7 +302,7 @@ mod tests {
         assert_eq!(
             saved,
             Some(WeeklyReading {
-                user_id: "1234".into(),
+                account: me(),
                 used_percent: 57.4,
                 resets_at: WEEK_RESET,
                 observed_at: NOW,
@@ -302,7 +312,7 @@ mod tests {
 
     #[test]
     fn idle_window_shows_zero_session_and_last_weekly() {
-        let last = reading("1234");
+        let last = reading(&me());
         let (snap, saved) = parse(&idle(), NOW, Some(&last)).unwrap();
         assert_eq!(snap.status, "ok");
         assert_eq!(saved, None, "an idle answer must not overwrite the reading");
@@ -319,7 +329,7 @@ mod tests {
 
     #[test]
     fn idle_after_weekly_reset_rolls_to_zero() {
-        let last = reading("1234");
+        let last = reading(&me());
         let later = WEEK_RESET + 8 * 24 * 3_600_000; // past two resets
         let (snap, _) = parse(&idle(), later, Some(&last)).unwrap();
         let weekly = &snap.metrics[1];
@@ -330,13 +340,27 @@ mod tests {
 
     #[test]
     fn idle_ignores_another_accounts_reading() {
-        let last = reading("9999");
+        let last = reading(&key_fingerprint("other@example.com"));
         let (snap, _) = parse(&idle(), NOW, Some(&last)).unwrap();
         assert_eq!(snap.metrics[1].kind, "text");
         let (snap, _) = parse(&idle(), NOW, None).unwrap();
         assert_eq!(snap.metrics.len(), 2);
         assert_eq!(snap.metrics[1].label, "Weekly");
         assert_eq!(snap.metrics[1].kind, "text");
+    }
+
+    #[test]
+    fn account_is_a_fingerprint_of_the_email() {
+        let mut doc = idle();
+        doc["user_email"] = json!(" SomeOne@Example.com ");
+        assert_eq!(account_of(&doc), Some(me()));
+        doc.as_object_mut().unwrap().remove("user_email");
+        assert_eq!(account_of(&doc), None);
+        doc["user_id"] = json!(42);
+        assert_eq!(account_of(&doc), Some(key_fingerprint("42")));
+        // The stored reading never holds the address itself.
+        let raw = serde_json::to_string(&reading(&me())).unwrap();
+        assert!(!raw.contains("example.com"));
     }
 
     #[test]
@@ -388,8 +412,8 @@ mod tests {
                 .unwrap_or(0)
         ));
         assert_eq!(load_reading_in(&dir), None);
-        save_reading_in(&dir, &reading("1234")).unwrap();
-        assert_eq!(load_reading_in(&dir), Some(reading("1234")));
+        save_reading_in(&dir, &reading(&me())).unwrap();
+        assert_eq!(load_reading_in(&dir), Some(reading(&me())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
