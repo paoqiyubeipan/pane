@@ -36,7 +36,7 @@ jobs:
       # The skipped Antigravity test needs a downloaded price catalog
       # (gemini-3.1-pro has no built-in card), which a fresh runner lacks.
       - name: Provider unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- providers::commandcode providers::muse providers::mistral providers::openrouter spend::tests --skip agy_pricing_retries_the_base_slug
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- providers::commandcode providers::muse providers::mistral providers::openrouter providers::opencode spend::tests --skip agy_pricing_retries_the_base_slug
 
       - name: Build installer (no updater signing)
         shell: pwsh
