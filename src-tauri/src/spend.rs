@@ -3357,53 +3357,69 @@ fn grok_line(model_by_pid: &mut HashMap<i64, String>, line: &str, data: &mut Fil
             add_event(data, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
 }
 
+/// OpenCode rows that belong to another Pane card's account.
+#[derive(Default)]
+struct OpencodeRouted {
+    aihubmix: FileData,
+    stepfun: FileData,
+    commandcode: FileData,
+    muse: FileData,
+}
+
+impl OpencodeRouted {
+    fn merge(&mut self, other: OpencodeRouted) {
+        merge_data(&mut self.aihubmix, other.aihubmix);
+        merge_data(&mut self.stepfun, other.stepfun);
+        merge_data(&mut self.commandcode, other.commandcode);
+        merge_data(&mut self.muse, other.muse);
+    }
+}
+
 /// OpenCode stores real per-message costs in its database — no pricing
 /// table needed.
-/// OpenCode's local log covers every provider routed through it. Gateway
-/// providers with their own Pane card (AihubMix) split into their own
-/// spend slice — their dollars belong to that account, and the split gives
-/// the card its Today/Yesterday/30d rows and Usage Trend; everything else
-/// stays under OpenCode.
-/// Returns OpenCode's spend plus the AihubMix and StepFun rows as raw
-/// FileData — the caller merges in traffic from other CLIs (Claude Code,
-/// Codex) before building each card's spend. StepFun rows arrive either
-/// under a `stepfun` provider id or as `step-*` model slugs logged while
-/// pointed at the Step Plan base URL.
+/// OpenCode's local log covers every provider routed through it. Providers
+/// with their own Pane card (AihubMix, Command Code, Muse) split into their
+/// own spend slice — their dollars belong to that account, and the split
+/// gives the card its Today/Yesterday/30d rows and Usage Trend; everything
+/// else stays under OpenCode.
+/// Returns OpenCode's spend plus the routed rows as raw FileData — the
+/// caller merges in traffic from other CLIs (Claude Code, Codex, each
+/// vendor's own CLI) before building each card's spend. StepFun rows
+/// arrive either under a `stepfun` provider id or as `step-*` model slugs
+/// logged while pointed at the Step Plan base URL. The provider id wins
+/// over the model slug: a Command Code row for a `step-*` model was paid
+/// from Command Code credits.
 fn fold_opencode_data(
     events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
-) -> (FileData, FileData, FileData) {
+) -> (FileData, OpencodeRouted) {
     let mut oc = FileData::default();
-    let mut aihubmix = FileData::default();
-    let mut stepfun = FileData::default();
+    let mut routed = OpencodeRouted::default();
     for (ts_ms, cost, tokens, model, provider) in events {
         if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
-            let target = if provider == "aihubmix" {
-                &mut aihubmix
-            } else if provider == "stepfun" || is_stepfun_model(&model) {
-                &mut stepfun
-            } else {
-                &mut oc
+            let target = match provider.as_str() {
+                "aihubmix" => &mut routed.aihubmix,
+                "commandcode" | "command-code" => &mut routed.commandcode,
+                "muse-code" | "muse" => &mut routed.muse,
+                _ if provider == "stepfun" || is_stepfun_model(&model) => &mut routed.stepfun,
+                _ => &mut oc,
             };
             add_event(target, ts, &model, cost, tokens);
         }
     }
-    (oc, aihubmix, stepfun)
+    (oc, routed)
 }
 
 /// One discovery pass, then partition. Calling extra_ledger_homes twice
 /// could move a dir across the default/extra boundary if auth swapped
 /// between the two reads and double-count that ledger.
-fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData, FileData) {
+fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, OpencodeRouted) {
     let homes = providers::opencode::extra_ledger_homes();
-    let (mut oc, mut aihubmix, mut stepfun) =
-        fold_opencode_data(providers::opencode::collect_cost_events());
+    let (mut oc, mut routed) = fold_opencode_data(providers::opencode::collect_cost_events());
     let mut groups: std::collections::BTreeMap<String, (String, FileData)> =
         std::collections::BTreeMap::new();
     for (id, name, dir) in homes {
-        let (data, extra_ai, extra_sf) =
-            fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
-        merge_data(&mut aihubmix, extra_ai);
-        merge_data(&mut stepfun, extra_sf);
+        let (data, extra) = fold_opencode_data(providers::opencode::collect_cost_events_in(&dir));
+        routed.merge(extra);
         if id == "opencode" {
             merge_data(&mut oc, data);
         } else {
@@ -3415,7 +3431,7 @@ fn opencode_accounts() -> (ProviderSpend, Vec<ProviderSpend>, FileData, FileData
         .into_iter()
         .map(|(id, (name, data))| build_spend(id, name, data))
         .collect();
-    (build_spend("opencode", "OpenCode", oc), extras, aihubmix, stepfun)
+    (build_spend("opencode", "OpenCode", oc), extras, routed)
 }
 
 /// Devin CLI keeps per-request token metrics in its local sessions.db
@@ -3873,6 +3889,475 @@ fn qwen() -> ProviderSpend {
     build_spend("qwen", "Qwen Code", all)
 }
 
+/// One Command Code CLI transcript line → spend event. Assistant `message`
+/// lines carry the request's model, usage and the CLI's own `costUsd` — its
+/// catalog list price, the same dollars plan credits are charged in.
+/// `inputTokens` already includes the cache reads and writes.
+fn commandcode_line(line: &str, data: &mut FileData) {
+    if !line.contains("\"usage\"") {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    if v.get("type").and_then(Value::as_str) != Some("message") {
+        return;
+    }
+    let Some(u) = v.get("usage").filter(|u| u.is_object()) else { return };
+    // The request's own clock; the entry timestamp lags when a turn's
+    // entries are written in one batch.
+    let Some(ts) = parse_ts(v.pointer("/message/meta/createdAt"))
+        .or_else(|| parse_ts(v.get("timestamp")))
+    else {
+        return;
+    };
+    let model = v.get("model").and_then(Value::as_str).unwrap_or("unknown");
+    let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let (total_input, output) = (num("inputTokens"), num("outputTokens"));
+    let (cache_read, w5m, w1h) = (
+        num("cacheReadTokens"),
+        num("cacheWriteTokens"),
+        num("cacheWriteTokens1h"),
+    );
+    let tokens = total_input + output;
+    if tokens <= 0.0 {
+        return;
+    }
+    // A recorded costUsd — 0 for free models — is what the plan pays.
+    if let Some(cost) = u.get("costUsd").and_then(Value::as_f64) {
+        add_event(data, ts, model, cost.max(0.0), tokens);
+        return;
+    }
+    // Bring-your-own-key OpenRouter rows carry no cost: `:free` ones cost
+    // nothing, others price from the catalog without the router prefix.
+    if model.ends_with(":free") {
+        add_event(data, ts, model, 0.0, tokens);
+        return;
+    }
+    let bare = model.strip_prefix("openrouter/").unwrap_or(model);
+    match probe_lookup(model).or_else(|| probe_lookup(bare)) {
+        Some(p) => {
+            let usage = pricing::Usage {
+                input: (total_input - cache_read - w5m - w1h).max(0.0),
+                output,
+                cache_read,
+                cache_write_5m: w5m,
+                cache_write_1h: w1h,
+            };
+            add_event(data, ts, model, cost_for(model, &p, &usage, 200_000.0, ts), tokens);
+        }
+        None => note_unpriced(data, ts, model, tokens),
+    }
+}
+
+/// Command Code spend from its CLI: session transcripts under
+/// ~/.commandcode/projects/<project>/<session>.jsonl. The
+/// `*.checkpoints.jsonl` beside them hold turn bookkeeping, never usage.
+fn commandcode_spend_data() -> FileData {
+    let root = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".commandcode")
+        .join("projects");
+    let mut files = Vec::new();
+    recent_jsonl_files(&root, &mut files);
+    files.retain(|p| {
+        !p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".checkpoints.jsonl"))
+    });
+    let mut all = FileData::default();
+    for file in files {
+        merge_data(&mut all, file_days(&file, &mut |line, data| commandcode_line(line, data)));
+    }
+    all
+}
+
+/// Model label for Muse usage logged before the file named its model.
+const MUSE_UNKNOWN_MODEL: &str = "muse (model unknown)";
+
+/// One Muse CLI session.jsonl line → spend event. Two record kinds carry
+/// billed usage: the main agent's `model_completed`, and
+/// `goal_usage_attribution` for requests made outside the main loop
+/// (reminder children, compaction). Every main request also has a
+/// `main_root` attribution twin, and checkpoints carry cumulative totals —
+/// both skipped. Attributions name no model; they run on the session's,
+/// which is the model last seen in the file. `input_tokens` includes the
+/// cached part and `output_tokens` the reasoning.
+fn muse_line(last_model: &mut Option<String>, line: &str, data: &mut FileData) {
+    let usage_line =
+        line.contains("\"model_completed\"") || line.contains("\"goal_usage_attribution\"");
+    if !usage_line && !line.contains("\"session_metadata\"") {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    if let Some(m) = [
+        "/payload/payload/session_metadata/model_id",
+        "/payload/record/command/session_metadata/model_id",
+    ]
+    .iter()
+    .find_map(|p| v.pointer(p).and_then(Value::as_str))
+    {
+        *last_model = Some(m.to_string());
+    }
+    let Some(event) = v.pointer("/payload/event") else { return };
+    let (model, input, output, cache_read, cache_write) =
+        match event.get("kind").and_then(Value::as_str) {
+            Some("model_completed") => {
+                let Some(model) = event.get("model").and_then(Value::as_str) else { return };
+                *last_model = Some(model.to_string());
+                let u = event.get("usage").cloned().unwrap_or(Value::Null);
+                let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                let cache_read = u
+                    .get("cache_read_tokens")
+                    .or_else(|| u.get("cached_tokens"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                (
+                    model.to_string(),
+                    num("input_tokens"),
+                    num("output_tokens"),
+                    cache_read,
+                    num("cache_write_tokens"),
+                )
+            }
+            Some("goal_usage_attribution") => {
+                let Some(rec) = event.get("record") else { return };
+                let owner = rec.pointer("/owner/owner_type").and_then(Value::as_str);
+                let counted = match rec.get("usage_family").and_then(Value::as_str) {
+                    Some("compaction") => true,
+                    Some("provider") => owner != Some("main_root"),
+                    _ => false,
+                };
+                let q = rec.get("quantity").cloned().unwrap_or(Value::Null);
+                if !counted || q.get("reported").and_then(Value::as_bool) != Some(true) {
+                    return;
+                }
+                let num = |k: &str| q.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                let model = last_model
+                    .clone()
+                    .unwrap_or_else(|| MUSE_UNKNOWN_MODEL.to_string());
+                (
+                    model,
+                    num("input_tokens"),
+                    num("output_tokens"),
+                    num("cached_tokens"),
+                    0.0,
+                )
+            }
+            _ => return,
+        };
+    // recorded_at is epoch MICROseconds.
+    let Some(ts) = v
+        .get("recorded_at")
+        .and_then(Value::as_i64)
+        .and_then(|us| DateTime::from_timestamp_millis(us / 1000))
+    else {
+        return;
+    };
+    let tokens = input + output;
+    if tokens <= 0.0 {
+        return;
+    }
+    // Catalogs key Meta's ids as "meta/<id>"; the bare id is a fuzzy match
+    // that can land on a reseller's card.
+    match probe_lookup(&format!("meta/{model}")).or_else(|| probe_lookup(&model)) {
+        Some(p) => {
+            let usage = pricing::Usage {
+                input: (input - cache_read).max(0.0),
+                output,
+                cache_read,
+                cache_write_5m: cache_write,
+                cache_write_1h: 0.0,
+            };
+            add_event(data, ts, &model, cost_for(&model, &p, &usage, 200_000.0, ts), tokens);
+        }
+        None => note_unpriced(data, ts, &model, tokens),
+    }
+}
+
+/// Muse spend from its CLI: one session.jsonl per session under
+/// ~/.local/share/muse/sessions/YYYY/MM/DD/<id>/. Reminder children's own
+/// `subagent/<id>/session.jsonl` repeat what the parent's attribution
+/// already counts, so only top-level session logs are read.
+fn muse_spend_data() -> FileData {
+    let root = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".local")
+        .join("share")
+        .join("muse")
+        .join("sessions");
+    let mut files = Vec::new();
+    recent_jsonl_files(&root, &mut files);
+    files.retain(|p| {
+        p.file_name().and_then(|n| n.to_str()) == Some("session.jsonl")
+            && !p.components().any(|c| c.as_os_str() == "subagent")
+    });
+    let mut all = FileData::default();
+    for file in files {
+        let mut last_model = None;
+        let data = file_days_stateful(&file, &mut |line, data| {
+            muse_line(&mut last_model, line, data)
+        });
+        merge_data(&mut all, data);
+    }
+    all
+}
+
+/// One `[[models]]` entry of Vibe's config.toml: API name, provider and
+/// the per-million rates Vibe itself bills with.
+#[derive(Clone, Debug, PartialEq)]
+struct VibeModel {
+    name: String,
+    provider: String,
+    input: f64,
+    output: f64,
+    cached: Option<f64>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct VibeConfig {
+    /// Keyed by alias — what sessions record as their active model.
+    models: HashMap<String, VibeModel>,
+    active_model: Option<String>,
+}
+
+fn vibe_config(toml_text: &str) -> VibeConfig {
+    let Ok(doc) = toml::from_str::<toml::Value>(toml_text) else {
+        return VibeConfig::default();
+    };
+    let mut models = HashMap::new();
+    for m in doc.get("models").and_then(toml::Value::as_array).into_iter().flatten() {
+        let Some(name) = m.get("name").and_then(toml::Value::as_str) else { continue };
+        let alias = m.get("alias").and_then(toml::Value::as_str).unwrap_or(name);
+        let rate = |k: &str| {
+            m.get(k)
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+        };
+        models.insert(
+            alias.to_string(),
+            VibeModel {
+                name: name.to_string(),
+                provider: m
+                    .get("provider")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("mistral")
+                    .to_string(),
+                input: rate("input_price").unwrap_or(0.0),
+                output: rate("output_price").unwrap_or(0.0),
+                cached: rate("cached_input_price"),
+            },
+        );
+    }
+    VibeConfig {
+        models,
+        active_model: doc
+            .get("active_model")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// One model call from a Vibe unified-session journal.
+#[derive(Debug, PartialEq)]
+struct VibeCall {
+    action_id: String,
+    ts_ms: Option<i64>,
+    input: f64,
+    cached: f64,
+    output: f64,
+}
+
+/// A journal records each model call three times: the intent (no usage),
+/// the `action_result` (usage) and a `core_input` echo carrying the same
+/// usage plus the call's clock. Count the result; take the time from the
+/// echo. `projection_delta` lines hold running session totals — never
+/// summed. `input_tokens` includes `cached_input_tokens`.
+fn vibe_journal_calls(text: &str) -> Vec<VibeCall> {
+    let mut calls = Vec::new();
+    let mut times: HashMap<String, i64> = HashMap::new();
+    for line in text.lines() {
+        if !line.contains("\"completion_") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        match v.get("type").and_then(Value::as_str) {
+            Some("action_result") => {
+                let Some(res) = v.pointer("/payload/result") else { continue };
+                if res.get("type").and_then(Value::as_str) != Some("completion_succeeded") {
+                    continue;
+                }
+                let Some(id) = v.pointer("/payload/action_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(u) = res.pointer("/result/usage") else { continue };
+                let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                calls.push(VibeCall {
+                    action_id: id.to_string(),
+                    ts_ms: None,
+                    input: num("input_tokens"),
+                    cached: num("cached_input_tokens"),
+                    output: num("output_tokens"),
+                });
+            }
+            Some("core_input") => {
+                let Some(cmd) = v.pointer("/payload/input/command") else { continue };
+                let is_completion = cmd
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t.starts_with("completion_"));
+                let id = cmd.get("action_id").and_then(Value::as_str);
+                let ms = v
+                    .pointer("/payload/input/determinism/time_unix_ms")
+                    .and_then(Value::as_i64);
+                if let (true, Some(id), Some(ms)) = (is_completion, id, ms) {
+                    times.insert(id.to_string(), ms);
+                }
+            }
+            _ => {}
+        }
+    }
+    for call in &mut calls {
+        call.ts_ms = times.get(&call.action_id).copied();
+    }
+    calls
+}
+
+/// The model alias a unified session ran on: CURRENT names the live
+/// generation, whose runtime-state.json records it.
+fn vibe_session_model(session_dir: &Path) -> Option<String> {
+    let current: Value =
+        serde_json::from_str(&fs::read_to_string(session_dir.join("CURRENT")).ok()?).ok()?;
+    let generation = match current.get("generation")? {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    if generation.is_empty() || !generation.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let path = session_dir
+        .join("generations")
+        .join(generation)
+        .join("runtime-state.json");
+    if fs::metadata(&path).ok()?.len() > 64 * 1024 * 1024 {
+        return None;
+    }
+    let state: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    state
+        .pointer("/session_metadata/active_model")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Price one Vibe call: the live catalog (Mistral's card, with its cache
+/// discount) first, then the rates in Vibe's own config. Local providers
+/// (llama.cpp and the like) cost nothing.
+fn vibe_add(
+    data: &mut FileData,
+    ts: DateTime<Utc>,
+    alias: &str,
+    cfg: Option<&VibeModel>,
+    call: &VibeCall,
+) {
+    let tokens = call.input + call.output;
+    if tokens <= 0.0 {
+        return;
+    }
+    if cfg.is_some_and(|m| m.provider != "mistral") {
+        add_event(data, ts, alias, 0.0, tokens);
+        return;
+    }
+    let cached = call.cached.clamp(0.0, call.input.max(0.0));
+    let usage = pricing::Usage {
+        input: (call.input - cached).max(0.0),
+        output: call.output,
+        cache_read: cached,
+        cache_write_5m: 0.0,
+        cache_write_1h: 0.0,
+    };
+    let name = cfg.map(|m| m.name.as_str()).unwrap_or(alias);
+    let price = [format!("mistral/{name}"), format!("mistral/{alias}"), name.to_string()]
+        .iter()
+        .find_map(|k| pricing::lookup(k));
+    match (price, cfg.filter(|m| m.input > 0.0 || m.output > 0.0)) {
+        (Some(p), _) => add_event(data, ts, alias, cost_for(name, &p, &usage, 200_000.0, ts), tokens),
+        (None, Some(m)) => {
+            let cost = (usage.input * m.input
+                + cached * m.cached.unwrap_or(m.input)
+                + usage.output * m.output)
+                / 1e6;
+            add_event(data, ts, alias, cost, tokens);
+        }
+        (None, None) => note_unpriced(data, ts, alias, tokens),
+    }
+}
+
+fn vibe_home() -> PathBuf {
+    std::env::var_os("VIBE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".vibe"))
+}
+
+/// Mistral Vibe spend from its unified session store:
+/// logs/session/unified/<session>/journal/<seq>.jsonl. Journals are small
+/// and calls are deduped across sessions by action id (forks copy them),
+/// so every scan rebuilds from all recent journals. The model is per
+/// session. Pre-3.x `session_*/meta.json` logs only hold whole-session
+/// totals and are not read.
+fn vibe_spend_data() -> FileData {
+    let home = vibe_home();
+    let config = fs::read_to_string(home.join("config.toml"))
+        .map(|t| vibe_config(&t))
+        .unwrap_or_default();
+    let root = home.join("logs").join("session").join("unified");
+    let mut files = Vec::new();
+    recent_jsonl_files(&root, &mut files);
+    let mut sessions: std::collections::BTreeMap<PathBuf, Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    for file in files {
+        let Some(journal) = file.parent() else { continue };
+        if journal.file_name().and_then(|n| n.to_str()) != Some("journal") {
+            continue;
+        }
+        let Some(session) = journal.parent() else { continue };
+        sessions.entry(session.to_path_buf()).or_default().push(file);
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut data = FileData::default();
+    for (session, mut segments) in sessions {
+        segments.sort();
+        let mut text = String::new();
+        for segment in &segments {
+            if let Ok(t) = fs::read_to_string(segment) {
+                text.push_str(&t);
+                text.push('\n');
+            }
+        }
+        let alias = vibe_session_model(&session)
+            .or_else(|| config.active_model.clone())
+            .unwrap_or_else(|| "mistral-vibe".to_string());
+        let cfg = config.models.get(&alias);
+        let fallback_ts = segments
+            .last()
+            .and_then(|p| fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .map(DateTime::<Utc>::from);
+        for call in vibe_journal_calls(&text) {
+            if !seen.insert(call.action_id.clone()) {
+                continue;
+            }
+            let Some(ts) = call
+                .ts_ms
+                .and_then(DateTime::from_timestamp_millis)
+                .or(fallback_ts)
+            else {
+                continue;
+            };
+            vibe_add(&mut data, ts, &alias, cfg, &call);
+        }
+    }
+    data
+}
+
 /// Kimi Code spend: CLI sessions under ~/.kimi-code/sessions — each
 /// agent's wire.jsonl logs one usage.record per turn. Files on the plan
 /// card when a login or pasted plan key exists *and* the card is on;
@@ -4102,6 +4587,9 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         let dsh_t = s.spawn(|| spend_step("deepseek", deepseek_harness));
         let agy_t = s.spawn(|| spend_step("antigravity", antigravity));
         let qwen_t = s.spawn(|| spend_step("qwen", qwen));
+        let cc_t = s.spawn(|| spend_step("commandcode", commandcode_spend_data));
+        let muse_t = s.spawn(|| spend_step("muse", muse_spend_data));
+        let vibe_t = s.spawn(|| spend_step("mistral", vibe_spend_data));
 
         let (claude_sp, extra_claude_spends, mut minimax_extra, aihubmix_via_claude, mut kimi_routed, mut stepfun_data) =
             take_join(claude_t, "claude", (
@@ -4124,16 +4612,25 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
         );
         merge_data(&mut kimi_routed, kimi_via_codex);
         merge_data(&mut stepfun_data, stepfun_via_codex);
-        let (opencode_sp, extra_opencode_spends, mut aihubmix_data, stepfun_via_opencode) = take_join(
+        let (opencode_sp, extra_opencode_spends, oc_routed) = take_join(
             oc_t,
             "opencode",
             (
                 build_spend("opencode", "OpenCode", FileData::default()),
                 Vec::new(),
-                FileData::default(),
-                FileData::default(),
+                OpencodeRouted::default(),
             ),
         );
+        let OpencodeRouted {
+            aihubmix: mut aihubmix_data,
+            stepfun: stepfun_via_opencode,
+            commandcode: commandcode_via_opencode,
+            muse: muse_via_opencode,
+        } = oc_routed;
+        let mut commandcode_data = take_join(cc_t, "commandcode", FileData::default());
+        merge_data(&mut commandcode_data, commandcode_via_opencode);
+        let mut muse_data = take_join(muse_t, "muse", FileData::default());
+        merge_data(&mut muse_data, muse_via_opencode);
         let (deepseek_data, dsh_aihubmix) = take_join(
             dsh_t,
             "deepseek",
@@ -4174,6 +4671,13 @@ pub fn collect(cursor_csv: Option<String>) -> Vec<ProviderSpend> {
             stepfun(stepfun_data),
             kimi(kimi_routed),
             take_join(qwen_t, "qwen", build_spend("qwen", "Qwen Code", FileData::default())),
+            build_spend("commandcode", "Command Code", commandcode_data),
+            build_spend("muse", "Muse Code", muse_data),
+            build_spend(
+                "mistral",
+                "Mistral Vibe",
+                take_join(vibe_t, "mistral", FileData::default()),
+            ),
         ];
         list.extend(extra_claude_spends);
         list.extend(extra_codex_spends);
@@ -6865,16 +7369,278 @@ mod tests {
     fn opencode_provider_wins_over_stepfun_prefixed_model() {
         // An aihubmix-routed row keeps its card even when the model slug
         // itself would match StepFun — provider overrides stay.
-        let (_oc, aihubmix, stepfun) = fold_opencode_data([
+        let (_oc, routed) = fold_opencode_data([
             (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into()),
             (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into()),
         ]);
-        assert_eq!(cost_sum(&aihubmix), 1.0);
-        assert_eq!(cost_sum(&stepfun), 2.0);
-        assert!(stepfun
+        assert_eq!(cost_sum(&routed.aihubmix), 1.0);
+        assert_eq!(cost_sum(&routed.stepfun), 2.0);
+        assert!(routed
+            .stepfun
             .days
             .keys()
             .any(|(_, m)| m == "stepfun/step-3.7-flash"));
+    }
+
+    #[test]
+    fn opencode_routes_commandcode_and_muse_rows_to_their_cards() {
+        let (oc, routed) = fold_opencode_data([
+            (1000.0, 0.3, 30.0, "meta/muse-spark-1.3-contributor".into(), "commandcode".into()),
+            // Paid from Command Code credits even though the slug is StepFun's.
+            (1000.0, 0.1, 10.0, "step-3.7-flash".into(), "commandcode".into()),
+            (1000.0, 0.0, 15.0, "muse-spark-1.3-contributor".into(), "muse-code".into()),
+            (1000.0, 4.0, 40.0, "gpt-test".into(), "openai".into()),
+        ]);
+        assert!((cost_sum(&routed.commandcode) - 0.4).abs() < 1e-9);
+        assert_eq!(tokens_sum(&routed.commandcode), 40.0);
+        assert_eq!(tokens_sum(&routed.muse), 15.0);
+        assert!(routed.stepfun.days.is_empty());
+        assert_eq!(cost_sum(&oc), 4.0);
+    }
+
+    #[test]
+    fn opencode_routed_merge_keeps_every_bucket() {
+        let (_, mut a) = fold_opencode_data([
+            (1000.0, 1.0, 10.0, "m".into(), "commandcode".into()),
+            (1000.0, 2.0, 20.0, "m".into(), "aihubmix".into()),
+        ]);
+        let (_, b) = fold_opencode_data([
+            (1000.0, 3.0, 30.0, "m".into(), "commandcode".into()),
+            (1000.0, 0.0, 5.0, "m".into(), "muse".into()),
+        ]);
+        a.merge(b);
+        assert_eq!(cost_sum(&a.commandcode), 4.0);
+        assert_eq!(cost_sum(&a.aihubmix), 2.0);
+        assert_eq!(tokens_sum(&a.muse), 5.0);
+    }
+
+    // ---- Command Code / Muse / Mistral Vibe CLI logs --------------------
+
+    fn hour_of(ts: DateTime<Utc>) -> i64 {
+        ts.timestamp().div_euclid(3600)
+    }
+
+    #[test]
+    fn commandcode_lines_prefer_the_recorded_cost() {
+        let now = Utc::now();
+        let ms = now.timestamp_millis();
+        let mut data = FileData::default();
+        // Recorded cost wins; inputTokens already holds the cache tokens.
+        let paid = json!({"type": "message", "model": "cc-test-model",
+            "timestamp": "2020-01-01T00:00:00Z",
+            "message": {"meta": {"createdAt": ms, "messageId": "m1"}},
+            "usage": {"inputTokens": 1000.0, "outputTokens": 50.0, "cacheReadTokens": 600.0,
+                      "cacheWriteTokens": 100.0, "costUsd": 0.5}})
+        .to_string();
+        commandcode_line(&paid, &mut data);
+        // A recorded zero (free model) is still a counted request.
+        let free = json!({"type": "message", "model": "cc-test-free", "timestamp": now.to_rfc3339(),
+            "usage": {"inputTokens": 200.0, "outputTokens": 20.0, "costUsd": 0.0}})
+        .to_string();
+        commandcode_line(&free, &mut data);
+        // BYOK router row without a cost: `:free` costs nothing.
+        let byok_free = json!({"type": "message", "model": "openrouter/cc-test:free",
+            "timestamp": now.to_rfc3339(),
+            "usage": {"inputTokens": 300.0, "outputTokens": 30.0}})
+        .to_string();
+        commandcode_line(&byok_free, &mut data);
+        // Not a message line / no usage → ignored.
+        commandcode_line(r#"{"type":"checkpoint","usage":{"inputTokens":9}}"#, &mut data);
+        commandcode_line("not json \"usage\"", &mut data);
+        assert!((cost_sum(&data) - 0.5).abs() < 1e-9);
+        assert_eq!(tokens_sum(&data), 1050.0 + 220.0 + 330.0);
+        assert!(data.unpriced.is_empty());
+        // The createdAt clock, not the stale entry timestamp.
+        assert!(data.hours.keys().all(|(h, _)| *h == hour_of(now)));
+
+        // Without a recorded cost a model no catalog knows stays unpriced
+        // but its tokens still count.
+        let mut unknown = FileData::default();
+        let line = json!({"type": "message", "model": "openrouter/cc-test-unknown",
+            "timestamp": now.to_rfc3339(),
+            "usage": {"inputTokens": 400.0, "outputTokens": 40.0}})
+        .to_string();
+        commandcode_line(&line, &mut unknown);
+        assert_eq!(tokens_sum(&unknown), 440.0);
+        assert_eq!(unknown.unpriced.get("openrouter/cc-test-unknown"), Some(&1));
+    }
+
+    #[test]
+    fn muse_lines_count_each_request_once_with_microsecond_clock() {
+        let now = Utc::now();
+        let us = now.timestamp_micros();
+        let rec = |payload: serde_json::Value| {
+            json!({"schema_version": 1, "id": "x", "stream": {"kind": "session", "id": "s"},
+                "sequence": 1, "recorded_at": us, "record_type": "event", "payload": payload})
+            .to_string()
+        };
+        let attribution = |family: &str, owner: &str, input: f64, output: f64| {
+            rec(json!({"kind": "run_event", "run_id": "r", "event": {
+                "kind": "goal_usage_attribution",
+                "record": {"usage_family": family, "owner": {"owner_type": owner},
+                    "quantity": {"unit": "tokens", "reported": true, "input_tokens": input,
+                                 "output_tokens": output, "cached_tokens": 0.0}}}}))
+        };
+        let mut last_model = None;
+        let mut data = FileData::default();
+        let lines = [
+            rec(json!({"kind": "start", "run_id": "r",
+                "payload": {"session_metadata": {"model_id": "muse-test-model"}}})),
+            // Main request, once as model_completed…
+            rec(json!({"kind": "run_event", "run_id": "r", "event": {
+                "kind": "model_completed", "model": "muse-test-model",
+                "usage": {"input_tokens": 1000.0, "output_tokens": 100.0,
+                          "cache_read_tokens": 400.0, "cached_tokens": 400.0,
+                          "cache_write_tokens": 0.0, "reasoning_tokens": 30.0}}})),
+            // …and its main_root twin, which must not add again.
+            attribution("provider", "main_root", 1000.0, 100.0),
+            // A reminder child and a compaction call: counted.
+            attribution("provider", "reminder_child", 200.0, 20.0),
+            attribution("compaction", "main_root", 300.0, 30.0),
+            // Cumulative checkpoint: never summed.
+            rec(json!({"kind": "run_event", "run_id": "r", "event": {
+                "kind": "context_projection_checkpoint",
+                "usage": {"input_tokens": 99999.0, "output_tokens": 9999.0}}})),
+        ];
+        for line in &lines {
+            muse_line(&mut last_model, line, &mut data);
+        }
+        assert_eq!(tokens_sum(&data), 1100.0 + 220.0 + 330.0);
+        // Attributions name no model — they land on the session's.
+        assert!(data.days.keys().all(|(_, m)| m == "muse-test-model"));
+        assert_eq!(data.unpriced.get("muse-test-model"), Some(&3));
+        // recorded_at is microseconds: the event sits in this hour, not
+        // a thousand times later.
+        assert!(data.hours.keys().all(|(h, _)| *h == hour_of(now)));
+
+        // An attribution before any model was named still counts.
+        let mut cold = FileData::default();
+        muse_line(&mut None, &attribution("compaction", "main_root", 10.0, 1.0), &mut cold);
+        assert!(cold.days.keys().all(|(_, m)| m == MUSE_UNKNOWN_MODEL));
+        assert_eq!(tokens_sum(&cold), 11.0);
+    }
+
+    #[test]
+    fn vibe_config_maps_aliases_to_api_names_and_rates() {
+        let cfg = vibe_config(
+            r#"
+active_model = "medium"
+
+[[models]]
+name = "vibe-test-latest"
+provider = "mistral"
+alias = "medium"
+input_price = 1.5
+output_price = 7.5
+
+[[models]]
+name = "local-test"
+provider = "llamacpp"
+alias = "local"
+input_price = 0
+output_price = 0
+cached_input_price = 0.0
+"#,
+        );
+        assert_eq!(cfg.active_model.as_deref(), Some("medium"));
+        let medium = &cfg.models["medium"];
+        assert_eq!(medium.name, "vibe-test-latest");
+        assert_eq!((medium.input, medium.output, medium.cached), (1.5, 7.5, None));
+        assert_eq!(cfg.models["local"].provider, "llamacpp");
+        assert_eq!(cfg.models["local"].cached, Some(0.0));
+        assert_eq!(vibe_config("not = [toml"), VibeConfig::default());
+    }
+
+    #[test]
+    fn vibe_journal_counts_results_once_with_the_echo_clock() {
+        let usage = json!({"input_tokens": 1000, "cached_input_tokens": 600,
+                           "output_tokens": 50, "total_tokens": 1050});
+        let lines = [
+            json!({"type": "action_intent", "payload": {"action_id": "a1", "kind": "completion",
+                "request": {"type": "llm_call", "purpose": "agent"}}}),
+            json!({"type": "action_result", "payload": {"action_id": "a1", "state": "succeeded",
+                "result": {"type": "completion_succeeded", "action_id": "a1",
+                           "result": {"usage": usage}}}}),
+            json!({"type": "core_input", "payload": {"input": {
+                "command": {"type": "completion_succeeded", "action_id": "a1", "usage": usage},
+                "determinism": {"time_unix_ms": 1_790_000_000_000_i64}}}}),
+            // A failed call has no usage and is not billed.
+            json!({"type": "action_result", "payload": {"action_id": "a2", "state": "failed",
+                "result": {"type": "completion_failed", "action_id": "a2"}}}),
+            // Running session totals: never summed.
+            json!({"type": "projection_delta", "payload": {"delta": [{"state": {"session":
+                {"tokenUsage": {"inputTokens": 5000, "outputTokens": 500}}}}],
+                "note": "completion_succeeded"}}),
+            // Tool results are not model calls.
+            json!({"type": "action_result", "payload": {"action_id": "t1", "state": "succeeded",
+                "result": {"type": "tool_succeeded", "action_id": "t1"}}}),
+        ];
+        let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        let calls = vibe_journal_calls(&text);
+        assert_eq!(
+            calls,
+            vec![VibeCall {
+                action_id: "a1".into(),
+                ts_ms: Some(1_790_000_000_000),
+                input: 1000.0,
+                cached: 600.0,
+                output: 50.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn vibe_calls_price_from_config_and_local_models_are_free() {
+        let now = Utc::now();
+        let call = VibeCall {
+            action_id: "a".into(),
+            ts_ms: None,
+            input: 1_000_000.0,
+            cached: 600_000.0,
+            output: 100_000.0,
+        };
+        let cfg = VibeModel {
+            name: "vibe-test-unlisted".into(),
+            provider: "mistral".into(),
+            input: 1.5,
+            output: 7.5,
+            cached: Some(0.15),
+        };
+        let mut data = FileData::default();
+        vibe_add(&mut data, now, "vibe-test-alias", Some(&cfg), &call);
+        // 0.4M × 1.5 + 0.6M × 0.15 + 0.1M × 7.5 = 0.6 + 0.09 + 0.75
+        assert!((cost_sum(&data) - 1.44).abs() < 1e-9);
+        assert_eq!(tokens_sum(&data), 1_100_000.0);
+
+        let local = VibeModel { provider: "llamacpp".into(), ..cfg.clone() };
+        let mut free = FileData::default();
+        vibe_add(&mut free, now, "local", Some(&local), &call);
+        assert_eq!(cost_sum(&free), 0.0);
+        assert!(free.unpriced.is_empty());
+
+        // No catalog card and no configured rate: tokens only.
+        let mut unpriced = FileData::default();
+        vibe_add(&mut unpriced, now, "vibe-test-nowhere", None, &call);
+        assert_eq!(unpriced.unpriced.get("vibe-test-nowhere"), Some(&1));
+    }
+
+    #[test]
+    fn vibe_session_model_follows_current_generation() {
+        let dir = std::env::temp_dir().join(format!("pane-vibe-model-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let gen = dir.join("generations").join("0000000000000103");
+        fs::create_dir_all(&gen).unwrap();
+        fs::write(dir.join("CURRENT"), r#"{"generation": "0000000000000103"}"#).unwrap();
+        fs::write(
+            gen.join("runtime-state.json"),
+            r#"{"session_metadata": {"active_model": "medium"}}"#,
+        )
+        .unwrap();
+        assert_eq!(vibe_session_model(&dir).as_deref(), Some("medium"));
+        // A generation name that would escape the session dir is refused.
+        fs::write(dir.join("CURRENT"), r#"{"generation": "../x"}"#).unwrap();
+        assert_eq!(vibe_session_model(&dir), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

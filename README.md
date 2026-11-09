@@ -132,7 +132,7 @@ resets ("Limit reset").
 **4. Counting the money.** Your CLIs already log every request locally.
 Pane scans those logs (Claude, Codex, Grok, OpenCode, Devin CLI,
 Droid CLI, Antigravity, Cursor CSV, MiniMax CLI, Kimi Code, Qwen Code,
-the pi coding agent and its oh-my-pi / Step Code forks, the Hermes
+Command Code, Muse Code, Mistral Vibe, the pi coding agent and its oh-my-pi / Step Code forks, the Hermes
 desktop app), prices each
 request with live per-model rates (LiteLLM /
 models.dev, refreshed daily — hourly while unknown models are around, so
@@ -176,9 +176,9 @@ error text) — see [Privacy](#privacy--security) for the full contract.
 | ElevenLabs | API key (Settings) → character quota with reset pacing |
 | Ollama | Local server on :11434 — installed + loaded models, no key |
 | Codebuff | `codebuff login` credentials file or API key → credits + weekly limit |
-| Command Code | `commandcode login` key file or API key → 5-hour, weekly and monthly dollar limits |
-| Muse Code | `muse login` device token (`%USERPROFILE%\.config\muse\auth.json`) → 5-hour and weekly usage |
-| Mistral Vibe | Pasted console.mistral.ai Cookie header → Vibe allowance |
+| Command Code | `commandcode login` key file or API key → 5-hour, weekly and monthly dollar limits + local spend |
+| Muse Code | `muse login` device token (`%USERPROFILE%\.config\muse\auth.json`) → 5-hour and weekly usage + local spend |
+| Mistral Vibe | Pasted console.mistral.ai Cookie header → Vibe allowance + local spend |
 | Kilo | Kilo CLI login file or API key → credit blocks + Kilo Pass |
 | AihubMix | API key (Settings or auto-detected from OpenCode) → usage vs spending limit |
 | One/New API | Add multiple compatible sites and keys in Settings; one quota card per key, with owner-only local secret storage |

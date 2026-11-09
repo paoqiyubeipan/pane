@@ -20,6 +20,12 @@
 - **Mistral Vibe card.** Paste the Cookie header of a console.mistral.ai
   request in Settings → API keys to see the Vibe allowance — Mistral
   shows it only to its web console.
+- **Spend for Command Code, Muse Code and Mistral Vibe.** Their cards
+  now show Today / Yesterday / 30-day usage and cost from each CLI's
+  local logs: Command Code's recorded per-request cost, Muse at Meta's
+  API prices, Vibe at Mistral's prices (or your `config.toml` rates).
+  OpenCode requests made through the Command Code and Muse plugins move
+  from the OpenCode card to these cards.
 - Updated the secure-connection (rustls), DeepSeek Harness log reader
   (zstd) and build (Vite) libraries to fix known security advisories.
 

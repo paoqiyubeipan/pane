@@ -510,6 +510,15 @@ Ground rules that apply to every provider:
   (size from `monthlyCreditsGranted`, else the plan's published price;
   an unlisted plan id shows the remaining dollars as text), purchased
   credits, plan.
+- **Spend:** the CLI's session transcripts
+  (`%USERPROFILE%\.commandcode\projects\<project>\<session>.jsonl`, never
+  `*.checkpoints.jsonl`): every assistant `message` with `usage`, timed by
+  `message.meta.createdAt`. The recorded `costUsd` (the CLI's list-price
+  estimate, in the dollars plan credits are counted in) is used as-is, 0
+  on free models. Bring-your-own-key OpenRouter rows carry none: `:free`
+  ones cost $0, the rest price from the catalog. OpenCode rows under the
+  `commandcode` provider (the opencode-cmd-provider plugin) move here from
+  the OpenCode card.
 
 ## Muse Code
 
@@ -525,6 +534,15 @@ Ground rules that apply to every provider:
   `%APPDATA%\Pane\muse_last_usage.json` and rolled to 0% at its weekly
   reset. Use while Pane is not running can make that reading low until the
   next active window.
+- **Spend:** the CLI's session logs
+  (`%USERPROFILE%\.local\share\muse\sessions\YYYY\MM\DD\<id>\session.jsonl`):
+  each `model_completed` event, plus the `goal_usage_attribution` records
+  of reminder-child and compaction calls (no model on them, so they take
+  the session's). The `main_root` attribution twin, the cumulative
+  checkpoints and the children's own `subagent\` logs are skipped. Muse
+  logs no price; requests price at Meta's API card (`meta/<model>` in the
+  catalogs). OpenCode rows under the `muse-code` provider move here from
+  the OpenCode card.
 
 ## Mistral Vibe
 
@@ -536,6 +554,15 @@ Ground rules that apply to every provider:
   those two cookies and the matching `X-CSRFToken`, redirects off (an
   expired session answers 302 to auth.mistral.ai).
 - **Shows:** Vibe allowance used percentage and reset time.
+- **Spend:** the CLI's unified session store
+  (`%USERPROFILE%\.vibe\logs\session\unified\<session>\journal\*.jsonl`,
+  or under `VIBE_HOME`): each successful completion result, timed by its
+  `core_input` echo and counted once per action id across sessions. The
+  model is the session's (`CURRENT` → `generations\<gen>\runtime-state.json`),
+  mapped through the `[[models]]` aliases in `config.toml`; it prices at
+  the catalog's Mistral card, else at the `config.toml` rates, and local
+  providers cost $0. Journal segments Vibe has already pruned drop out;
+  pre-3.x `session_*` logs hold only session totals and are not read.
 
 ## Kilo
 

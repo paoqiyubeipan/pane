@@ -1,4 +1,4 @@
-# Fork-only build: unit tests for the added providers, then an unsigned
+# Fork-only build: unit tests for the added providers and spend, then an unsigned
 # installer uploaded as a run artifact. release.yml needs the upstream
 # updater signing key, which a fork does not have, so this workflow turns
 # updater artifacts off instead of signing them.
@@ -34,7 +34,7 @@ jobs:
         run: npm run build
 
       - name: Provider unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- providers::commandcode providers::muse providers::mistral providers::openrouter
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- providers::commandcode providers::muse providers::mistral providers::openrouter spend::
 
       - name: Build installer (no updater signing)
         shell: pwsh
