@@ -3389,22 +3389,44 @@ impl OpencodeRouted {
 /// logged while pointed at the Step Plan base URL. The provider id wins
 /// over the model slug: a Command Code row for a `step-*` model was paid
 /// from Command Code credits.
+/// Command Code and Muse rows join cards whose own CLI logs count the
+/// whole prompt, so their cache tokens are added back (OpenCode's count
+/// leaves the cache out). The Muse plugin logs every request at $0 — no
+/// rate card in its provider config — so those rows price at Meta's card
+/// like `muse_line`.
 fn fold_opencode_data(
-    events: impl IntoIterator<Item = (f64, f64, f64, String, String)>,
+    events: impl IntoIterator<Item = providers::opencode::CostEvent>,
 ) -> (FileData, OpencodeRouted) {
     let mut oc = FileData::default();
     let mut routed = OpencodeRouted::default();
-    for (ts_ms, cost, tokens, model, provider) in events {
-        if let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) {
-            let target = match provider.as_str() {
-                "aihubmix" => &mut routed.aihubmix,
-                "commandcode" | "command-code" => &mut routed.commandcode,
-                "muse-code" | "muse" => &mut routed.muse,
-                _ if provider == "stepfun" || is_stepfun_model(&model) => &mut routed.stepfun,
-                _ => &mut oc,
-            };
-            add_event(target, ts, &model, cost, tokens);
+    for (ts_ms, cost, tokens, model, provider, split) in events {
+        let Some(ts) = DateTime::from_timestamp_millis(ts_ms as i64) else { continue };
+        let [input, output, cache_read, cache_write] = split;
+        let (target, whole_prompt) = match provider.as_str() {
+            "aihubmix" => (&mut routed.aihubmix, false),
+            "commandcode" | "command-code" => (&mut routed.commandcode, true),
+            "muse-code" | "muse" => (&mut routed.muse, true),
+            _ if provider == "stepfun" || is_stepfun_model(&model) => (&mut routed.stepfun, false),
+            _ => (&mut oc, false),
+        };
+        let tokens = if whole_prompt { tokens + cache_read + cache_write } else { tokens };
+        if matches!(provider.as_str(), "muse-code" | "muse") && cost <= 0.0 && tokens > 0.0 {
+            match pricing::lookup(&format!("meta/{model}")).or_else(|| pricing::lookup(&model)) {
+                Some(p) => {
+                    let u = pricing::Usage {
+                        input,
+                        output,
+                        cache_read,
+                        cache_write_5m: cache_write,
+                        cache_write_1h: 0.0,
+                    };
+                    add_event(target, ts, &model, cost_for(&model, &p, &u, 200_000.0, ts), tokens);
+                }
+                None => note_unpriced(target, ts, &model, tokens),
+            }
+            continue;
         }
+        add_event(target, ts, &model, cost, tokens);
     }
     (oc, routed)
 }
@@ -4105,10 +4127,90 @@ fn muse_line(last_model: &mut Option<String>, line: &str, data: &mut FileData) {
     }
 }
 
+/// Parse state for one Muse session log.
+struct MuseFile {
+    path: PathBuf,
+    /// The session's model as last seen — attributions name none.
+    last_model: Option<String>,
+    /// Whether the file head was already searched for a model.
+    head_tried: bool,
+    /// This is a reminder child's own log (`subagent/<id>/session.jsonl`).
+    child: bool,
+    /// A child log whose request counts here. Builds since 1.4.14 tag
+    /// the child's own provider attribution `reminder_child` and the
+    /// parent's log attributes the same request, so the child adds
+    /// nothing. 1.4.10 tagged it `main_root` and the parent never
+    /// recorded the request: only the child's own log has it. The tag
+    /// comes before the child's `model_completed`; a child without the
+    /// old tag is never counted, so an unknown layout can only under-,
+    /// never double-count.
+    child_counts: bool,
+}
+
+impl MuseFile {
+    fn new(path: &Path) -> Self {
+        MuseFile {
+            path: path.to_path_buf(),
+            last_model: None,
+            head_tried: false,
+            child: path.components().any(|c| c.as_os_str() == "subagent"),
+            child_counts: false,
+        }
+    }
+}
+
+/// The first model a Muse session log names (its start record's
+/// metadata). Seeds attributions met before any model line — a tail
+/// rescan replays only the last 1 MB, and a session can log megabytes of
+/// tool output between two requests.
+fn muse_head_model(path: &Path) -> Option<String> {
+    let mut head = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(256 * 1024)
+        .read_to_end(&mut head)
+        .ok()?;
+    String::from_utf8_lossy(&head)
+        .lines()
+        .filter(|l| l.contains("\"session_metadata\"") || l.contains("\"model_completed\""))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find_map(|v| {
+            [
+                "/payload/payload/session_metadata/model_id",
+                "/payload/record/command/session_metadata/model_id",
+                "/payload/event/model",
+            ]
+            .iter()
+            .find_map(|p| v.pointer(p).and_then(Value::as_str).map(str::to_string))
+        })
+}
+
+fn muse_file_line(st: &mut MuseFile, line: &str, data: &mut FileData) {
+    let attribution = line.contains("\"goal_usage_attribution\"");
+    if st.child {
+        if !st.child_counts && attribution && line.contains("\"main_root\"") {
+            st.child_counts = serde_json::from_str::<Value>(line).ok().is_some_and(|v| {
+                let rec = v.pointer("/payload/event/record");
+                rec.and_then(|r| r.get("usage_family")).and_then(Value::as_str) == Some("provider")
+                    && rec.and_then(|r| r.pointer("/owner/owner_type")).and_then(Value::as_str)
+                        == Some("main_root")
+            });
+        }
+        if !st.child_counts {
+            return;
+        }
+    }
+    if attribution && st.last_model.is_none() && !st.head_tried {
+        st.head_tried = true;
+        st.last_model = muse_head_model(&st.path);
+    }
+    muse_line(&mut st.last_model, line, data);
+}
+
 /// Muse spend from its CLI: one session.jsonl per session under
-/// ~/.local/share/muse/sessions/YYYY/MM/DD/<id>/. Reminder children's own
-/// `subagent/<id>/session.jsonl` repeat what the parent's attribution
-/// already counts, so only top-level session logs are read.
+/// ~/.local/share/muse/sessions/YYYY/MM/DD/<id>/, plus the reminder
+/// children's own `subagent/<id>/session.jsonl` from builds whose parent
+/// log never recorded them (see `MuseFile::child_counts`).
 fn muse_spend_data() -> FileData {
     let root = dirs::home_dir()
         .unwrap_or_default()
@@ -4118,16 +4220,11 @@ fn muse_spend_data() -> FileData {
         .join("sessions");
     let mut files = Vec::new();
     recent_jsonl_files(&root, &mut files);
-    files.retain(|p| {
-        p.file_name().and_then(|n| n.to_str()) == Some("session.jsonl")
-            && !p.components().any(|c| c.as_os_str() == "subagent")
-    });
+    files.retain(|p| p.file_name().and_then(|n| n.to_str()) == Some("session.jsonl"));
     let mut all = FileData::default();
     for file in files {
-        let mut last_model = None;
-        let data = file_days_stateful(&file, &mut |line, data| {
-            muse_line(&mut last_model, line, data)
-        });
+        let mut st = MuseFile::new(&file);
+        let data = file_days_stateful(&file, &mut |line, data| muse_file_line(&mut st, line, data));
         merge_data(&mut all, data);
     }
     all
@@ -4325,6 +4422,55 @@ fn vibe_add(
     }
 }
 
+/// Usage Vibe pruned from a session's journal. When a resumed session is
+/// checkpointed again Vibe keeps two generations and deletes the journal
+/// segments the older one covers; that generation's projection snapshot
+/// (`snapshot_sequence` = first kept record − 1) holds the session's
+/// running token totals for exactly the deleted records. Returned as one
+/// call dated at that snapshot. Forks are skipped: their pruned prefix
+/// would include calls copied from the parent, which only per-call dedup
+/// can separate.
+fn vibe_pruned_baseline(session_dir: &Path, first_seq: u64) -> Option<(DateTime<Utc>, VibeCall)> {
+    if first_seq <= 1 {
+        return None;
+    }
+    let meta: Value =
+        serde_json::from_str(&fs::read_to_string(session_dir.join("meta.json")).ok()?).ok()?;
+    if meta.get("parent_session_id").is_some_and(|p| !p.is_null()) {
+        return None;
+    }
+    for entry in fs::read_dir(session_dir.join("generations")).ok()?.flatten() {
+        let path = entry.path().join("projection-state.json");
+        if fs::metadata(&path).map_or(true, |m| m.len() > 64 * 1024 * 1024) {
+            continue;
+        }
+        let Some(v) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        else {
+            continue;
+        };
+        if v.get("snapshot_sequence").and_then(Value::as_u64) != Some(first_seq - 1) {
+            continue;
+        }
+        let u = v.pointer("/snapshot/session/tokenUsage").filter(|u| u.is_object())?;
+        let ts = parse_ts(v.pointer("/snapshot/session/updatedAt"))?;
+        let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        let session = session_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        return Some((
+            ts,
+            VibeCall {
+                action_id: format!("pruned:{session}"),
+                ts_ms: Some(ts.timestamp_millis()),
+                input: num("inputTokens"),
+                cached: num("cachedInputTokens"),
+                output: num("outputTokens"),
+            },
+        ));
+    }
+    None
+}
+
 fn vibe_home() -> PathBuf {
     std::env::var_os("VIBE_HOME")
         .map(PathBuf::from)
@@ -4336,8 +4482,10 @@ fn vibe_home() -> PathBuf {
 /// logs/session/unified/<session>/journal/<seq>.jsonl. Journals are small
 /// and calls are deduped across sessions by action id (forks copy them),
 /// so every scan rebuilds from all recent journals. The model is per
-/// session. Pre-3.x `session_*/meta.json` logs only hold whole-session
-/// totals and are not read.
+/// session. Records whose segments Vibe already pruned come back as one
+/// lump from the snapshot taken before them (`vibe_pruned_baseline`).
+/// Pre-3.x `session_*/meta.json` logs only hold whole-session totals and
+/// are not read.
 fn vibe_spend_data() -> FileData {
     let home = vibe_home();
     let config = fs::read_to_string(home.join("config.toml"))
@@ -4371,6 +4519,14 @@ fn vibe_spend_data() -> FileData {
             .or_else(|| config.active_model.clone())
             .unwrap_or_else(|| "mistral-vibe".to_string());
         let cfg = config.models.get(&alias);
+        // Segments are named by their first record's sequence number.
+        let first_seq = segments
+            .first()
+            .and_then(|p| p.file_stem()?.to_str()?.parse::<u64>().ok())
+            .unwrap_or(1);
+        if let Some((ts, base)) = vibe_pruned_baseline(&session, first_seq) {
+            vibe_add(&mut data, ts, &alias, cfg, &base);
+        }
         let fallback_ts = segments
             .last()
             .and_then(|p| fs::metadata(p).ok())
@@ -7405,8 +7561,8 @@ mod tests {
         // An aihubmix-routed row keeps its card even when the model slug
         // itself would match StepFun — provider overrides stay.
         let (_oc, routed) = fold_opencode_data([
-            (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into()),
-            (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into()),
+            (1000.0, 1.0, 10.0, "aihubmix/step-3.7-flash".into(), "aihubmix".into(), [0.0; 4]),
+            (1000.0, 2.0, 20.0, "stepfun/step-3.7-flash".into(), "openrouter".into(), [0.0; 4]),
         ]);
         assert_eq!(cost_sum(&routed.aihubmix), 1.0);
         assert_eq!(cost_sum(&routed.stepfun), 2.0);
@@ -7420,11 +7576,11 @@ mod tests {
     #[test]
     fn opencode_routes_commandcode_and_muse_rows_to_their_cards() {
         let (oc, routed) = fold_opencode_data([
-            (1000.0, 0.3, 30.0, "meta/muse-spark-1.3-contributor".into(), "commandcode".into()),
+            (1000.0, 0.3, 30.0, "meta/muse-spark-1.3-contributor".into(), "commandcode".into(), [0.0; 4]),
             // Paid from Command Code credits even though the slug is StepFun's.
-            (1000.0, 0.1, 10.0, "step-3.7-flash".into(), "commandcode".into()),
-            (1000.0, 0.0, 15.0, "muse-spark-1.3-contributor".into(), "muse-code".into()),
-            (1000.0, 4.0, 40.0, "gpt-test".into(), "openai".into()),
+            (1000.0, 0.1, 10.0, "step-3.7-flash".into(), "commandcode".into(), [0.0; 4]),
+            (1000.0, 0.0, 15.0, "muse-spark-1.3-contributor".into(), "muse-code".into(), [0.0; 4]),
+            (1000.0, 4.0, 40.0, "gpt-test".into(), "openai".into(), [0.0; 4]),
         ]);
         assert!((cost_sum(&routed.commandcode) - 0.4).abs() < 1e-9);
         assert_eq!(tokens_sum(&routed.commandcode), 40.0);
@@ -7436,17 +7592,48 @@ mod tests {
     #[test]
     fn opencode_routed_merge_keeps_every_bucket() {
         let (_, mut a) = fold_opencode_data([
-            (1000.0, 1.0, 10.0, "m".into(), "commandcode".into()),
-            (1000.0, 2.0, 20.0, "m".into(), "aihubmix".into()),
+            (1000.0, 1.0, 10.0, "m".into(), "commandcode".into(), [0.0; 4]),
+            (1000.0, 2.0, 20.0, "m".into(), "aihubmix".into(), [0.0; 4]),
         ]);
         let (_, b) = fold_opencode_data([
-            (1000.0, 3.0, 30.0, "m".into(), "commandcode".into()),
-            (1000.0, 0.0, 5.0, "m".into(), "muse".into()),
+            (1000.0, 3.0, 30.0, "m".into(), "commandcode".into(), [0.0; 4]),
+            (1000.0, 0.0, 5.0, "m".into(), "muse".into(), [0.0; 4]),
         ]);
         a.merge(b);
         assert_eq!(cost_sum(&a.commandcode), 4.0);
         assert_eq!(cost_sum(&a.aihubmix), 2.0);
         assert_eq!(tokens_sum(&a.muse), 5.0);
+    }
+
+    #[test]
+    fn opencode_rows_for_cli_cards_count_the_whole_prompt() {
+        // OpenCode's tokens (input 6 + output 12) leave out 100 cache-read
+        // and 2 cache-write tokens; the Command Code and Muse cards count
+        // them, like their CLIs do. Other cards keep OpenCode's count.
+        let split = [6.0, 12.0, 100.0, 2.0];
+        let (oc, routed) = fold_opencode_data([
+            (1000.0, 0.5, 18.0, "m".into(), "commandcode".into(), split),
+            (1000.0, 0.5, 18.0, "m".into(), "opencode-go".into(), split),
+            (1000.0, 0.5, 18.0, "m".into(), "aihubmix".into(), split),
+        ]);
+        assert_eq!(tokens_sum(&routed.commandcode), 120.0);
+        assert_eq!(cost_sum(&routed.commandcode), 0.5);
+        assert_eq!(tokens_sum(&oc), 18.0);
+        assert_eq!(tokens_sum(&routed.aihubmix), 18.0);
+    }
+
+    #[test]
+    fn opencode_muse_rows_logged_at_zero_are_priced_or_flagged() {
+        // The Muse plugin logs $0; a model no catalog knows is flagged
+        // unpriced (tokens still count) instead of passing as free.
+        let (_, routed) = fold_opencode_data([
+            (1000.0, 0.0, 18.0, "muse-test-unknown".into(), "muse-code".into(), [6.0, 12.0, 100.0, 0.0]),
+            // A carried cost above zero is kept as-is.
+            (1000.0, 0.25, 18.0, "muse-test-unknown".into(), "muse".into(), [6.0, 12.0, 0.0, 0.0]),
+        ]);
+        assert_eq!(routed.muse.unpriced.get("muse-test-unknown"), Some(&1));
+        assert_eq!(tokens_sum(&routed.muse), 118.0 + 18.0);
+        assert_eq!(cost_sum(&routed.muse), 0.25);
     }
 
     // ---- Command Code / Muse / Mistral Vibe CLI logs --------------------
@@ -7612,6 +7799,72 @@ mod tests {
         assert!(nameless.days.keys().all(|(_, m)| m == "muse-test-model"));
     }
 
+    fn muse_rec(payload: serde_json::Value) -> String {
+        json!({"schema_version": 1, "id": "x", "stream": {"kind": "session", "id": "s"},
+            "sequence": 1, "recorded_at": Utc::now().timestamp_micros(), "record_type": "event",
+            "payload": payload})
+        .to_string()
+    }
+
+    fn muse_provider_attr(owner: &str) -> String {
+        muse_rec(json!({"kind": "run_event", "run_id": "r", "event": {
+            "kind": "goal_usage_attribution",
+            "record": {"usage_family": "provider", "owner": {"owner_type": owner},
+                "quantity": {"unit": "tokens", "reported": true, "input_tokens": 100.0,
+                             "output_tokens": 10.0, "cached_tokens": 0.0}}}}))
+    }
+
+    #[test]
+    fn muse_child_logs_count_only_when_the_parent_never_recorded_them() {
+        let completed = muse_rec(json!({"kind": "run_event", "run_id": "r", "event": {
+            "kind": "model_completed", "model": "muse-test-model",
+            "usage": {"input_tokens": 100.0, "output_tokens": 10.0}}}));
+        let child = Path::new("sessions/2026/10/18/s1/subagent/c1/session.jsonl");
+        // 1.4.10: the child tags its own request main_root and the parent
+        // never records it — the child's model_completed counts once.
+        let mut old = MuseFile::new(child);
+        assert!(old.child);
+        let mut data = FileData::default();
+        for line in [muse_provider_attr("main_root"), completed.clone()] {
+            muse_file_line(&mut old, &line, &mut data);
+        }
+        assert_eq!(tokens_sum(&data), 110.0);
+        // 1.4.14+: tagged reminder_child, already counted from the parent.
+        let mut new = MuseFile::new(child);
+        let mut mirrored = FileData::default();
+        for line in [muse_provider_attr("reminder_child"), completed.clone()] {
+            muse_file_line(&mut new, &line, &mut mirrored);
+        }
+        assert!(mirrored.days.is_empty());
+        // No tag at all: never counted (could be mirrored).
+        let mut bare = MuseFile::new(child);
+        let mut untagged = FileData::default();
+        muse_file_line(&mut bare, &completed, &mut untagged);
+        assert!(untagged.days.is_empty());
+        // Top-level logs are not children.
+        assert!(!MuseFile::new(Path::new("sessions/2026/10/18/s1/session.jsonl")).child);
+    }
+
+    #[test]
+    fn muse_attribution_without_a_model_in_view_takes_the_head_model() {
+        let dir = std::env::temp_dir().join(format!("pane-muse-head-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("session.jsonl");
+        let start = muse_rec(json!({"kind": "start", "run_id": "r",
+            "payload": {"session_metadata": {"model_id": "muse-test-model"}}}));
+        fs::write(&log, format!("{start}\n")).unwrap();
+        assert_eq!(muse_head_model(&log).as_deref(), Some("muse-test-model"));
+        // A tail rescan whose warm-up holds no model line: the attribution
+        // still lands on the session's model, not "model unknown".
+        let mut st = MuseFile::new(&log);
+        let mut data = FileData::default();
+        muse_file_line(&mut st, &muse_provider_attr("reminder_child"), &mut data);
+        assert_eq!(tokens_sum(&data), 110.0);
+        assert!(data.days.keys().all(|(_, m)| m == "muse-test-model"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn vibe_config_maps_aliases_to_api_names_and_rates() {
         let cfg = vibe_config(
@@ -7747,6 +8000,39 @@ cached_input_price = 0.0
         // A generation name that would escape the session dir is refused.
         fs::write(dir.join("CURRENT"), r#"{"generation": "../x"}"#).unwrap();
         assert_eq!(vibe_session_model(&dir), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vibe_pruned_journal_comes_back_from_the_older_snapshot() {
+        let dir = std::env::temp_dir().join(format!("pane-vibe-pruned-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let older = dir.join("generations").join("0000000000000012");
+        let newer = dir.join("generations").join("0000000000000020");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(dir.join("meta.json"), r#"{"parent_session_id": null}"#).unwrap();
+        let snapshot = |seq: u64, input: u64| {
+            json!({"snapshot_sequence": seq, "snapshot": {"session": {
+                "updatedAt": 1_790_000_000_000_i64,
+                "tokenUsage": {"inputTokens": input, "cachedInputTokens": 30000,
+                               "outputTokens": 188, "totalTokens": input + 188}}}})
+            .to_string()
+        };
+        fs::write(older.join("projection-state.json"), snapshot(12, 39966)).unwrap();
+        fs::write(newer.join("projection-state.json"), snapshot(20, 80561)).unwrap();
+        // The journal now starts at record 13: records 1-12 were pruned and
+        // the generation-12 snapshot holds exactly their totals.
+        let (ts, base) = vibe_pruned_baseline(&dir, 13).expect("pruned prefix restored");
+        assert_eq!(ts.timestamp_millis(), 1_790_000_000_000);
+        assert_eq!((base.input, base.cached, base.output), (39966.0, 30000.0, 188.0));
+        // A complete journal (starts at record 1) adds nothing.
+        assert!(vibe_pruned_baseline(&dir, 1).is_none());
+        // No snapshot right before the first kept record: nothing to add.
+        assert!(vibe_pruned_baseline(&dir, 15).is_none());
+        // A fork's prefix holds the parent's calls: never lumped in.
+        fs::write(dir.join("meta.json"), r#"{"parent_session_id": "p"}"#).unwrap();
+        assert!(vibe_pruned_baseline(&dir, 13).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

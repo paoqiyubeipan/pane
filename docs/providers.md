@@ -520,7 +520,8 @@ Ground rules that apply to every provider:
   parent's history into the new transcript; requests logged before the
   `forkedAt` in its `<session>.meta.json` are left to the parent. OpenCode
   rows under the `commandcode` provider (the opencode-cmd-provider plugin)
-  move here from the OpenCode card.
+  move here from the OpenCode card, with their cache tokens counted like
+  the CLI's.
 
 ## Muse Code
 
@@ -540,11 +541,15 @@ Ground rules that apply to every provider:
   (`%USERPROFILE%\.local\share\muse\sessions\YYYY\MM\DD\<id>\session.jsonl`):
   each `model_completed` event, plus the `goal_usage_attribution` records
   of reminder-child and compaction calls (no model on them, so they take
-  the session's). The `main_root` attribution twin, the cumulative
-  checkpoints and the children's own `subagent\` logs are skipped. Muse
-  logs no price; requests price at Meta's API card (`meta/<model>` in the
-  catalogs). OpenCode rows under the `muse-code` provider move here from
-  the OpenCode card.
+  the session's). The `main_root` attribution twin and the cumulative
+  checkpoints are skipped. A reminder child's own `subagent\<id>\` log
+  counts only when it tags its request `main_root` (build 1.4.10, whose
+  parent log never recorded it); newer children are already in the
+  parent's attributions. Muse logs no price; requests price at Meta's API
+  card (`meta/<model>` in the catalogs). OpenCode rows under the
+  `muse-code` provider move here from the OpenCode card with their cache
+  tokens counted; the plugin logs them at $0, so they price at the same
+  card.
 
 ## Mistral Vibe
 
@@ -564,9 +569,11 @@ Ground rules that apply to every provider:
   mapped through the `[[models]]` aliases in `config.toml`. Mistral models
   price at the catalog's Mistral card, else at the `config.toml` rates;
   models on another provider price at their `config.toml` rates only (a
-  local model with none costs $0). Journal segments Vibe has already
-  pruned drop out;
-  pre-3.x `session_*` logs hold only session totals and are not read.
+  local model with none costs $0). When Vibe prunes a resumed session's
+  older journal segments, their usage comes back as one lump from the
+  generation snapshot taken right before the first kept record (forked
+  sessions excepted). Pre-3.x `session_*` logs hold only session totals
+  and are not read.
 
 ## Kilo
 
