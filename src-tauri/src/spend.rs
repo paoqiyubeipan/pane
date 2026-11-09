@@ -3892,8 +3892,10 @@ fn qwen() -> ProviderSpend {
 /// One Command Code CLI transcript line → spend event. Assistant `message`
 /// lines carry the request's model, usage and the CLI's own `costUsd` — its
 /// catalog list price, the same dollars plan credits are charged in.
-/// `inputTokens` already includes the cache reads and writes.
-fn commandcode_line(line: &str, data: &mut FileData) {
+/// `inputTokens` already includes the cache reads and writes. In a forked
+/// session `fork_cutoff` is the fork time: the history copied from the
+/// parent (requests made before it) is the parent's and is skipped here.
+fn commandcode_line(line: &str, data: &mut FileData, fork_cutoff: Option<DateTime<Utc>>) {
     if !line.contains("\"usage\"") {
         return;
     }
@@ -3909,14 +3911,17 @@ fn commandcode_line(line: &str, data: &mut FileData) {
     else {
         return;
     };
+    if fork_cutoff.is_some_and(|cut| ts < cut) {
+        return;
+    }
     let model = v.get("model").and_then(Value::as_str).unwrap_or("unknown");
     let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
     let (total_input, output) = (num("inputTokens"), num("outputTokens"));
-    let (cache_read, w5m, w1h) = (
-        num("cacheReadTokens"),
-        num("cacheWriteTokens"),
-        num("cacheWriteTokens1h"),
-    );
+    // cacheWriteTokens is every cache write — the CLI's own cost formula
+    // takes only it off the input — so a logged 1h part is inside it.
+    let (cache_read, writes) = (num("cacheReadTokens"), num("cacheWriteTokens"));
+    let w1h = num("cacheWriteTokens1h").clamp(0.0, writes.max(0.0));
+    let w5m = (writes - w1h).max(0.0);
     let tokens = total_input + output;
     if tokens <= 0.0 {
         return;
@@ -3936,7 +3941,7 @@ fn commandcode_line(line: &str, data: &mut FileData) {
     match probe_lookup(model).or_else(|| probe_lookup(bare)) {
         Some(p) => {
             let usage = pricing::Usage {
-                input: (total_input - cache_read - w5m - w1h).max(0.0),
+                input: (total_input - cache_read - writes).max(0.0),
                 output,
                 cache_read,
                 cache_write_5m: w5m,
@@ -3946,6 +3951,23 @@ fn commandcode_line(line: &str, data: &mut FileData) {
         }
         None => note_unpriced(data, ts, model, tokens),
     }
+}
+
+/// When a Command Code session is a fork, the time it was forked. `/fork`
+/// copies the parent's transcript into the new file and records
+/// `parentSessionId` + `forkedAt` in the `<session>.meta.json` beside it;
+/// everything logged before `forkedAt` is the parent's.
+fn commandcode_fork_cutoff(transcript: &Path) -> Option<DateTime<Utc>> {
+    let meta = transcript.with_extension("meta.json");
+    if fs::metadata(&meta).ok()?.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&fs::read_to_string(meta).ok()?).ok()?;
+    let parent = v.get("parentSessionId").and_then(Value::as_str)?;
+    if parent.is_empty() {
+        return None;
+    }
+    parse_ts(v.get("forkedAt"))
 }
 
 /// Command Code spend from its CLI: session transcripts under
@@ -3965,7 +3987,9 @@ fn commandcode_spend_data() -> FileData {
     });
     let mut all = FileData::default();
     for file in files {
-        merge_data(&mut all, file_days(&file, &mut |line, data| commandcode_line(line, data)));
+        let cutoff = commandcode_fork_cutoff(&file);
+        let data = file_days(&file, &mut |line, data| commandcode_line(line, data, cutoff));
+        merge_data(&mut all, data);
     }
     all
 }
@@ -3979,8 +4003,9 @@ const MUSE_UNKNOWN_MODEL: &str = "muse (model unknown)";
 /// (reminder children, compaction). Every main request also has a
 /// `main_root` attribution twin, and checkpoints carry cumulative totals —
 /// both skipped. Attributions name no model; they run on the session's,
-/// which is the model last seen in the file. `input_tokens` includes the
-/// cached part and `output_tokens` the reasoning.
+/// which is the model last seen in the file. `input_tokens` is the whole
+/// prompt (cache reads and any cache writes inside it; Muse has logged
+/// writes as 0 so far) and `output_tokens` includes the reasoning.
 fn muse_line(last_model: &mut Option<String>, line: &str, data: &mut FileData) {
     let usage_line =
         line.contains("\"model_completed\"") || line.contains("\"goal_usage_attribution\"");
@@ -4001,8 +4026,15 @@ fn muse_line(last_model: &mut Option<String>, line: &str, data: &mut FileData) {
     let (model, input, output, cache_read, cache_write) =
         match event.get("kind").and_then(Value::as_str) {
             Some("model_completed") => {
-                let Some(model) = event.get("model").and_then(Value::as_str) else { return };
-                *last_model = Some(model.to_string());
+                let model = match event.get("model").and_then(Value::as_str) {
+                    Some(m) => {
+                        *last_model = Some(m.to_string());
+                        m.to_string()
+                    }
+                    None => last_model
+                        .clone()
+                        .unwrap_or_else(|| MUSE_UNKNOWN_MODEL.to_string()),
+                };
                 let u = event.get("usage").cloned().unwrap_or(Value::Null);
                 let num = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
                 let cache_read = u
@@ -4011,7 +4043,7 @@ fn muse_line(last_model: &mut Option<String>, line: &str, data: &mut FileData) {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0);
                 (
-                    model.to_string(),
+                    model,
                     num("input_tokens"),
                     num("output_tokens"),
                     cache_read,
@@ -4061,7 +4093,7 @@ fn muse_line(last_model: &mut Option<String>, line: &str, data: &mut FileData) {
     match probe_lookup(&format!("meta/{model}")).or_else(|| probe_lookup(&model)) {
         Some(p) => {
             let usage = pricing::Usage {
-                input: (input - cache_read).max(0.0),
+                input: (input - cache_read - cache_write).max(0.0),
                 output,
                 cache_read,
                 cache_write_5m: cache_write,
@@ -4247,9 +4279,18 @@ fn vibe_session_model(session_dir: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Price one Vibe call: the live catalog (Mistral's card, with its cache
-/// discount) first, then the rates in Vibe's own config. Local providers
-/// (llama.cpp and the like) cost nothing.
+/// A call at the per-million rates in Vibe's config — Vibe's own
+/// session_token_cost formula (cached input falls back to the input rate).
+fn vibe_config_cost(m: &VibeModel, usage: &pricing::Usage) -> f64 {
+    (usage.input * m.input + usage.cache_read * m.cached.unwrap_or(m.input) + usage.output * m.output)
+        / 1e6
+}
+
+/// Price one Vibe call. Mistral models: the live catalog (Mistral's card,
+/// with its cache discount) first, then the rates in Vibe's own config.
+/// Models on another provider (a local llama.cpp server, a third-party
+/// API) are not on Mistral's price card: only their configured rates
+/// apply, and none configured — a local model — costs nothing.
 fn vibe_add(
     data: &mut FileData,
     ts: DateTime<Utc>,
@@ -4261,10 +4302,6 @@ fn vibe_add(
     if tokens <= 0.0 {
         return;
     }
-    if cfg.is_some_and(|m| m.provider != "mistral") {
-        add_event(data, ts, alias, 0.0, tokens);
-        return;
-    }
     let cached = call.cached.clamp(0.0, call.input.max(0.0));
     let usage = pricing::Usage {
         input: (call.input - cached).max(0.0),
@@ -4273,19 +4310,17 @@ fn vibe_add(
         cache_write_5m: 0.0,
         cache_write_1h: 0.0,
     };
+    if let Some(m) = cfg.filter(|m| m.provider != "mistral") {
+        add_event(data, ts, alias, vibe_config_cost(m, &usage), tokens);
+        return;
+    }
     let name = cfg.map(|m| m.name.as_str()).unwrap_or(alias);
     let price = [format!("mistral/{name}"), format!("mistral/{alias}"), name.to_string()]
         .iter()
         .find_map(|k| pricing::lookup(k));
     match (price, cfg.filter(|m| m.input > 0.0 || m.output > 0.0)) {
         (Some(p), _) => add_event(data, ts, alias, cost_for(name, &p, &usage, 200_000.0, ts), tokens),
-        (None, Some(m)) => {
-            let cost = (usage.input * m.input
-                + cached * m.cached.unwrap_or(m.input)
-                + usage.output * m.output)
-                / 1e6;
-            add_event(data, ts, alias, cost, tokens);
-        }
+        (None, Some(m)) => add_event(data, ts, alias, vibe_config_cost(m, &usage), tokens),
         (None, None) => note_unpriced(data, ts, alias, tokens),
     }
 }
@@ -7432,21 +7467,21 @@ mod tests {
             "usage": {"inputTokens": 1000.0, "outputTokens": 50.0, "cacheReadTokens": 600.0,
                       "cacheWriteTokens": 100.0, "costUsd": 0.5}})
         .to_string();
-        commandcode_line(&paid, &mut data);
+        commandcode_line(&paid, &mut data, None);
         // A recorded zero (free model) is still a counted request.
         let free = json!({"type": "message", "model": "cc-test-free", "timestamp": now.to_rfc3339(),
             "usage": {"inputTokens": 200.0, "outputTokens": 20.0, "costUsd": 0.0}})
         .to_string();
-        commandcode_line(&free, &mut data);
+        commandcode_line(&free, &mut data, None);
         // BYOK router row without a cost: `:free` costs nothing.
         let byok_free = json!({"type": "message", "model": "openrouter/cc-test:free",
             "timestamp": now.to_rfc3339(),
             "usage": {"inputTokens": 300.0, "outputTokens": 30.0}})
         .to_string();
-        commandcode_line(&byok_free, &mut data);
+        commandcode_line(&byok_free, &mut data, None);
         // Not a message line / no usage → ignored.
-        commandcode_line(r#"{"type":"checkpoint","usage":{"inputTokens":9}}"#, &mut data);
-        commandcode_line("not json \"usage\"", &mut data);
+        commandcode_line(r#"{"type":"checkpoint","usage":{"inputTokens":9}}"#, &mut data, None);
+        commandcode_line("not json \"usage\"", &mut data, None);
         assert!((cost_sum(&data) - 0.5).abs() < 1e-9);
         assert_eq!(tokens_sum(&data), 1050.0 + 220.0 + 330.0);
         assert!(data.unpriced.is_empty());
@@ -7460,9 +7495,55 @@ mod tests {
             "timestamp": now.to_rfc3339(),
             "usage": {"inputTokens": 400.0, "outputTokens": 40.0}})
         .to_string();
-        commandcode_line(&line, &mut unknown);
+        commandcode_line(&line, &mut unknown, None);
         assert_eq!(tokens_sum(&unknown), 440.0);
         assert_eq!(unknown.unpriced.get("openrouter/cc-test-unknown"), Some(&1));
+    }
+
+    #[test]
+    fn commandcode_fork_skips_the_copied_parent_history() {
+        let dir = std::env::temp_dir().join(format!("pane-cc-fork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let forked_at = Utc::now() - chrono::Duration::hours(2);
+        let entry = |ts: DateTime<Utc>, id: &str| {
+            json!({"type": "message", "model": "cc-test-model", "timestamp": ts.to_rfc3339(),
+                "message": {"meta": {"createdAt": ts.timestamp_millis(), "messageId": id}},
+                "usage": {"inputTokens": 100.0, "outputTokens": 10.0, "costUsd": 0.25}})
+            .to_string()
+        };
+        let transcript = dir.join("child.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                entry(forked_at - chrono::Duration::hours(1), "copied"),
+                entry(forked_at + chrono::Duration::minutes(5), "own")
+            ),
+        )
+        .unwrap();
+        // Not a fork yet: both requests count.
+        assert_eq!(commandcode_fork_cutoff(&transcript), None);
+        fs::write(
+            dir.join("child.meta.json"),
+            json!({"parentSessionId": "parent", "forkedAt": forked_at.to_rfc3339(),
+                   "branchPoint": "abcd1234"})
+            .to_string(),
+        )
+        .unwrap();
+        let cutoff = commandcode_fork_cutoff(&transcript);
+        assert!(cutoff.is_some());
+        let mut data = FileData::default();
+        for line in fs::read_to_string(&transcript).unwrap().lines() {
+            commandcode_line(line, &mut data, cutoff);
+        }
+        // Only the request made in the fork itself.
+        assert_eq!(cost_sum(&data), 0.25);
+        assert_eq!(tokens_sum(&data), 110.0);
+        // A plain session's metadata (no parent) never cuts.
+        fs::write(dir.join("child.meta.json"), r#"{"title": "x", "traceIds": []}"#).unwrap();
+        assert_eq!(commandcode_fork_cutoff(&transcript), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -7518,6 +7599,17 @@ mod tests {
         muse_line(&mut None, &attribution("compaction", "main_root", 10.0, 1.0), &mut cold);
         assert!(cold.days.keys().all(|(_, m)| m == MUSE_UNKNOWN_MODEL));
         assert_eq!(tokens_sum(&cold), 11.0);
+
+        // A completion that names no model keeps its usage on the
+        // session's model.
+        let mut nameless = FileData::default();
+        let line = rec(json!({"kind": "run_event", "run_id": "r", "event": {
+            "kind": "model_completed",
+            "usage": {"input_tokens": 50.0, "output_tokens": 5.0}}}));
+        let mut session_model = Some("muse-test-model".to_string());
+        muse_line(&mut session_model, &line, &mut nameless);
+        assert_eq!(tokens_sum(&nameless), 55.0);
+        assert!(nameless.days.keys().all(|(_, m)| m == "muse-test-model"));
     }
 
     #[test]
@@ -7612,11 +7704,26 @@ cached_input_price = 0.0
         assert!((cost_sum(&data) - 1.44).abs() < 1e-9);
         assert_eq!(tokens_sum(&data), 1_100_000.0);
 
-        let local = VibeModel { provider: "llamacpp".into(), ..cfg.clone() };
+        // A local model with no rates costs nothing and is not "unpriced".
+        let local = VibeModel {
+            provider: "llamacpp".into(),
+            input: 0.0,
+            output: 0.0,
+            cached: None,
+            ..cfg.clone()
+        };
         let mut free = FileData::default();
         vibe_add(&mut free, now, "local", Some(&local), &call);
         assert_eq!(cost_sum(&free), 0.0);
+        assert_eq!(tokens_sum(&free), 1_100_000.0);
         assert!(free.unpriced.is_empty());
+
+        // Another paid provider bills at its configured rates, never at
+        // Mistral's card.
+        let remote = VibeModel { provider: "openai-compatible".into(), ..cfg.clone() };
+        let mut paid = FileData::default();
+        vibe_add(&mut paid, now, "remote", Some(&remote), &call);
+        assert!((cost_sum(&paid) - 1.44).abs() < 1e-9);
 
         // No catalog card and no configured rate: tokens only.
         let mut unpriced = FileData::default();

@@ -516,9 +516,11 @@ Ground rules that apply to every provider:
   `message.meta.createdAt`. The recorded `costUsd` (the CLI's list-price
   estimate, in the dollars plan credits are counted in) is used as-is, 0
   on free models. Bring-your-own-key OpenRouter rows carry none: `:free`
-  ones cost $0, the rest price from the catalog. OpenCode rows under the
-  `commandcode` provider (the opencode-cmd-provider plugin) move here from
-  the OpenCode card.
+  ones cost $0, the rest price from the catalog. A `/fork` copies the
+  parent's history into the new transcript; requests logged before the
+  `forkedAt` in its `<session>.meta.json` are left to the parent. OpenCode
+  rows under the `commandcode` provider (the opencode-cmd-provider plugin)
+  move here from the OpenCode card.
 
 ## Muse Code
 
@@ -559,9 +561,11 @@ Ground rules that apply to every provider:
   or under `VIBE_HOME`): each successful completion result, timed by its
   `core_input` echo and counted once per action id across sessions. The
   model is the session's (`CURRENT` → `generations\<gen>\runtime-state.json`),
-  mapped through the `[[models]]` aliases in `config.toml`; it prices at
-  the catalog's Mistral card, else at the `config.toml` rates, and local
-  providers cost $0. Journal segments Vibe has already pruned drop out;
+  mapped through the `[[models]]` aliases in `config.toml`. Mistral models
+  price at the catalog's Mistral card, else at the `config.toml` rates;
+  models on another provider price at their `config.toml` rates only (a
+  local model with none costs $0). Journal segments Vibe has already
+  pruned drop out;
   pre-3.x `session_*` logs hold only session totals and are not read.
 
 ## Kilo
